@@ -14,7 +14,11 @@
     "node": ">=20"
   },
   "devDependencies": {
+<<<<<<< HEAD
     "@types/node": "^22.19.15",
+=======
+    "@types/node": "^22.14.1",
+>>>>>>> 7b67b63 (feat: add typed runtime config resolver for workflow settings)
     "typescript": "^5.8.2"
   }
 }
