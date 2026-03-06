@@ -15,9 +15,15 @@ npm run build
 npm run typecheck
 ```
 
-## Current modules (skeleton)
+## WORKFLOW.md schema (Issue #2)
 
-- `src/workflow/contract.ts` - WORKFLOW.md contract interface + loader placeholder
+- Schema document: `docs/workflow-schema.md`
+- Example file: `examples/WORKFLOW.md`
+- Validation entrypoint: `validateWorkflowContract` in `src/workflow/contract.ts`
+
+## Current modules
+
+- `src/workflow/contract.ts` - WORKFLOW.md contract + validation + loader placeholder
 - `src/model/work-item.ts` - normalized work-item model
 - `src/tracker/adapter.ts` - GitHub Projects tracker adapter interface + placeholder
 - `src/orchestrator/runtime.ts` - poll/tick runtime skeleton with bounded concurrency stub

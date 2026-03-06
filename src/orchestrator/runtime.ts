@@ -15,11 +15,12 @@ export class PollingRuntime implements OrchestratorRuntime {
 
   async tick(): Promise<void> {
     const items = await this.tracker.listEligibleItems();
-    const selected = items.slice(0, this.workflow.maxConcurrency);
+    const maxConcurrency = this.workflow.polling.maxConcurrency ?? 1;
+    const selected = items.slice(0, maxConcurrency);
     this.logger.info("runtime.tick", {
       eligibleCount: items.length,
       selectedCount: selected.length,
-      maxConcurrency: this.workflow.maxConcurrency,
+      maxConcurrency,
     });
   }
 }
