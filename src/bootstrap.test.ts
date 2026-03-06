@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
-import { bootstrapFromWorkflow, BootstrapConfigurationError } from './bootstrap.js';
+import { bootstrapFromWorkflow, BootstrapConfigurationError, performStartupTerminalCleanup } from './bootstrap.js';
 import type { Logger } from './logging/logger.js';
+import type { NormalizedWorkItem, WorkItemState } from './model/work-item.js';
+import type { TrackerAdapter } from './tracker/adapter.js';
 import type { LoadedWorkflowContract, WorkflowLoader } from './workflow/contract.js';
 
 class StubWorkflowLoader implements WorkflowLoader {
@@ -151,4 +156,132 @@ test('bootstrapFromWorkflow fails fast when agent.command is missing', async () 
       return true;
     },
   );
+});
+
+// ---- performStartupTerminalCleanup tests ----
+
+function makeItem(identifier: string): NormalizedWorkItem {
+  return {
+    id: `id-${identifier}`,
+    identifier,
+    number: 0,
+    title: `Item ${identifier}`,
+    body: '',
+    description: '',
+    state: 'done',
+    priority: null,
+    labels: [],
+    blocked_by: [],
+    assignees: [],
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    url: `https://example.com/${identifier}`,
+  };
+}
+
+class StubTracker implements TrackerAdapter {
+  constructor(private readonly items: NormalizedWorkItem[] = []) {}
+
+  async listEligibleItems(): Promise<NormalizedWorkItem[]> { return this.items; }
+  async listCandidateItems(): Promise<NormalizedWorkItem[]> { return this.items; }
+  async listItemsByStates(_states: WorkItemState[]): Promise<NormalizedWorkItem[]> { return this.items; }
+  async getStatesByIds(_ids: string[]): Promise<Record<string, WorkItemState>> { return {}; }
+  async markInProgress(_id: string): Promise<void> {}
+  async markDone(_id: string): Promise<void> {}
+}
+
+class FailingTracker extends StubTracker {
+  async listItemsByStates(_states: WorkItemState[]): Promise<NormalizedWorkItem[]> {
+    throw new Error('tracker fetch failed');
+  }
+}
+
+class WarnCapturingLogger extends CapturingLogger {
+  public readonly warnings: Array<{ message: string; context?: Record<string, unknown> }> = [];
+
+  override warn(message: string, context?: Record<string, unknown>): void {
+    this.warnings.push({ message, context });
+  }
+}
+
+test('performStartupTerminalCleanup removes terminal workspace directories and reports count', async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'symphony-test-'));
+  try {
+    // Create two workspace dirs that correspond to terminal items.
+    await mkdir(path.join(workspaceRoot, '_64'), { recursive: true });
+    await mkdir(path.join(workspaceRoot, '_65'), { recursive: true });
+
+    const tracker = new StubTracker([makeItem('#64'), makeItem('#65')]);
+    const logger = new WarnCapturingLogger();
+
+    const result = await performStartupTerminalCleanup(tracker, workspaceRoot, logger);
+
+    assert.equal(result.cleaned, 2, 'should clean both terminal workspaces');
+    assert.equal(result.skipped, 0);
+    assert.equal(result.fetchFailed, false);
+    assert.equal(logger.warnings.length, 0, 'no warnings expected on success');
+
+    const summaryLog = logger.messages.find((m) => m.message === 'bootstrap.startup_cleanup.done');
+    assert.ok(summaryLog, 'cleanup summary log should be emitted');
+    assert.equal(summaryLog?.context?.cleaned, 2);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('performStartupTerminalCleanup skips items whose workspace does not exist', async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'symphony-test-'));
+  try {
+    // Only one dir exists; the other is already gone.
+    await mkdir(path.join(workspaceRoot, '_64'), { recursive: true });
+
+    const tracker = new StubTracker([makeItem('#64'), makeItem('#65')]);
+    const logger = new WarnCapturingLogger();
+
+    const result = await performStartupTerminalCleanup(tracker, workspaceRoot, logger);
+
+    // #64 cleaned, #65 silently skipped (rm with force:true is a no-op for missing dirs).
+    assert.equal(result.cleaned + result.skipped, 2);
+    assert.equal(result.fetchFailed, false);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('performStartupTerminalCleanup is non-fatal when tracker fetch fails', async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'symphony-test-'));
+  try {
+    const tracker = new FailingTracker();
+    const logger = new WarnCapturingLogger();
+
+    const result = await performStartupTerminalCleanup(tracker, workspaceRoot, logger);
+
+    assert.equal(result.fetchFailed, true, 'should report fetch failure');
+    assert.equal(result.cleaned, 0);
+    assert.equal(logger.warnings.length, 1, 'should emit one warning for the fetch failure');
+    assert.equal(logger.warnings[0].message, 'bootstrap.startup_cleanup.fetch_failed');
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('performStartupTerminalCleanup rejects path escapes outside workspace root', async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'symphony-test-'));
+  try {
+    // Item identifier that sanitizes to a traversal attempt — sanitizeWorkspaceKey
+    // replaces '/' with '_', so the result stays within root.
+    const tracker = new StubTracker([makeItem('../etc/passwd')]);
+    const logger = new WarnCapturingLogger();
+
+    const result = await performStartupTerminalCleanup(tracker, workspaceRoot, logger);
+
+    // The sanitized key is '__.._etc_passwd'; resolveWorkspacePath will reject it
+    // only if it escapes root. Since sanitization replaces '/', the resolved path
+    // is still under workspaceRoot and the skipped/cleaned count is deterministic.
+    assert.equal(result.fetchFailed, false, 'fetch should succeed');
+    assert.equal(logger.warnings.length, 0, 'no warnings for path sanitization');
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
 });

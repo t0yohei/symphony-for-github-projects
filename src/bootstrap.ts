@@ -14,11 +14,14 @@ import {
   type LoadedWorkflowContract,
   type WorkflowLoader,
 } from './workflow/contract.js';
+import { WorkspaceManager } from './workspace/manager.js';
 
 export interface BootstrapDependencies {
   workflowLoader?: WorkflowLoader;
   trackerAdapter?: TrackerAdapter;
   logger?: Logger;
+  /** Skip startup terminal-workspace cleanup pass (useful for tests). */
+  skipStartupCleanup?: boolean;
 }
 
 export interface BootstrapResult {
@@ -32,6 +35,76 @@ export class BootstrapConfigurationError extends Error {
     super(message);
     this.name = 'BootstrapConfigurationError';
   }
+}
+
+export interface StartupCleanupResult {
+  cleaned: number;
+  skipped: number;
+  fetchFailed: boolean;
+}
+
+/**
+ * Performs a terminal-workspace cleanup pass at startup.
+ *
+ * Fetches items in terminal states (done by default) from the tracker,
+ * resolves each item's workspace path by its sanitized identifier, and
+ * removes the directory safely within the workspace root.
+ *
+ * Fetch failures are non-fatal: they are logged as warnings and the
+ * function returns without throwing.
+ */
+export async function performStartupTerminalCleanup(
+  tracker: TrackerAdapter,
+  workspaceRoot: string,
+  logger: Logger,
+  terminalStates: string[] = ['done'],
+): Promise<StartupCleanupResult> {
+  const manager = new WorkspaceManager({ workspaceRoot });
+
+  let items;
+  try {
+    items = await tracker.listItemsByStates(terminalStates as import('./model/work-item.js').WorkItemState[]);
+  } catch (err) {
+    logger.warn('bootstrap.startup_cleanup.fetch_failed', {
+      error: err instanceof Error ? err.message : String(err),
+      workspaceRoot,
+    });
+    return { cleaned: 0, skipped: 0, fetchFailed: true };
+  }
+
+  let cleaned = 0;
+  let skipped = 0;
+
+  for (const item of items) {
+    if (!item.identifier) {
+      skipped += 1;
+      continue;
+    }
+    let workspacePath: string;
+    try {
+      const key = manager.toWorkspaceKey(item.identifier);
+      workspacePath = manager.resolveWorkspacePath(key);
+    } catch {
+      skipped += 1;
+      continue;
+    }
+
+    try {
+      await manager.cleanupWorkspace(workspacePath);
+      cleaned += 1;
+    } catch {
+      skipped += 1;
+    }
+  }
+
+  logger.info('bootstrap.startup_cleanup.done', {
+    cleaned,
+    skipped,
+    terminalStates,
+    workspaceRoot,
+  });
+
+  return { cleaned, skipped, fetchFailed: false };
 }
 
 export async function bootstrapFromWorkflow(
@@ -57,6 +130,15 @@ export async function bootstrapFromWorkflow(
   }
 
   const tracker = deps.trackerAdapter ?? createTrackerFromWorkflow(workflow);
+
+  // Perform terminal-workspace cleanup before starting the scheduling loop.
+  // Uses the workspace root from workflow config; skipped when root is unset or
+  // explicitly opted out via deps.skipStartupCleanup.
+  const workspaceRoot = workflow.workspace.root ?? workflow.workspace.baseDir;
+  if (!deps.skipStartupCleanup && workspaceRoot) {
+    await performStartupTerminalCleanup(tracker, workspaceRoot, logger);
+  }
+
   const runtime = new PollingRuntime(tracker, workflow, logger);
 
   logger.info('bootstrap.ready', {
