@@ -31,7 +31,8 @@ npm test
 - `src/config/runtime-config.ts` - canonical runtime config type
 - `src/config/resolver.ts` - typed config getters + defaults/env resolution/validation
 - `src/logging/logger.ts` - structured JSON logger baseline
-- `src/bootstrap.ts` - loader/tracker/logger を束ねて runtime を生成する初期化ヘルパー
+- `src/bootstrap.ts` - initialization helper that wires loader/tracker/logger into runtime startup
+- `src/workspace/manager.ts` - deterministic workspace lifecycle manager with hooks and terminal-state cleanup guardrails
 
 ## Runtime behavior (current)
 
@@ -44,6 +45,14 @@ npm test
 - Runtime state is process-local and is reset on process restart.
 - After restart, the next tick reconstructs behavior from tracker eligibility and re-dispatches as needed.
 - This is acceptable for MVP/no-DB mode, but durable checkpoints will be required for stronger exactly-once guarantees.
+
+## Workspace manager behavior
+
+- Workspace directories are deterministic per item id via key sanitization (`item id -> safe slug`).
+- `ensureWorkspace` reuses the same directory across runs.
+- Lifecycle hooks are optional (`before_run`, `after_success`, `after_failure`) and run as non-shell commands with timeout guardrails.
+- Terminal-state cleanup is opt-in (`cleanup.enabled`) and guarded by allowed terminal states.
+- Cleanup always verifies the target path is inside the configured workspace root before deleting.
 
 ## Notes
 
