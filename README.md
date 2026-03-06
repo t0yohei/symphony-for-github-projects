@@ -13,6 +13,7 @@ npm install
 ```bash
 npm run build
 npm run typecheck
+npm test
 ```
 
 ## Current modules (skeleton)
@@ -22,6 +23,7 @@ npm run typecheck
 - `src/tracker/adapter.ts` - GitHub Projects tracker adapter interface + placeholder
 - `src/orchestrator/runtime.ts` - poll/tick runtime skeleton with bounded concurrency stub
 - `src/logging/logger.ts` - structured JSON logger baseline
+- `src/bootstrap.ts` - loader/tracker/logger を束ねて runtime を生成する初期化ヘルパー
 
 ## Notes
 
