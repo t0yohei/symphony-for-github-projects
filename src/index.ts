@@ -6,6 +6,7 @@ export * from './model/work-item.js';
 export * from './orchestrator/runtime.js';
 export * from './tracker/adapter.js';
 export * from './tracker/graphql-client.js';
+export * from './tracker/github-projects-client.js';
 export * from './tracker/github-projects-writer.js';
 export * from './agent/codex-app-server.js';
 export * from './workspace/hooks.js';
