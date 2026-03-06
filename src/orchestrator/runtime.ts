@@ -1,5 +1,5 @@
 import type { Logger } from '../logging/logger.js';
-import type { NormalizedWorkItem } from '../model/work-item.js';
+import type { NormalizedWorkItem, WorkItemState } from '../model/work-item.js';
 import type { TrackerAdapter } from '../tracker/adapter.js';
 import type { WorkflowContract } from '../workflow/contract.js';
 
@@ -161,16 +161,18 @@ export class PollingRuntime implements OrchestratorRuntime {
 
   private async reconcile(): Promise<void> {
     const now = this.now();
-    const runningIds = [...this.running.keys()];
-    if (runningIds.length === 0) {
+    if (this.running.size === 0) {
       return;
     }
 
-    for (const [itemId, entry] of this.running.entries()) {
-      if (now - entry.lastEventAt > this.stallTimeoutMs) {
-        this.running.delete(itemId);
-        this.claimed.delete(itemId);
-        this.scheduleRetry(entry.item, 'failure', 'stalled');
+    if (this.stallTimeoutMs > 0) {
+      for (const [itemId, entry] of this.running.entries()) {
+        const lastActivityAt = entry.lastEventAt || entry.startedAt;
+        if (now - lastActivityAt > this.stallTimeoutMs) {
+          this.running.delete(itemId);
+          this.claimed.delete(itemId);
+          this.scheduleRetry(entry.item, 'failure', 'stalled');
+        }
       }
     }
 
@@ -179,7 +181,18 @@ export class PollingRuntime implements OrchestratorRuntime {
       return;
     }
 
-    const trackerStates = await this.tracker.getStatesByIds(activeIds);
+    let trackerStates: Record<string, WorkItemState>;
+    try {
+      trackerStates = await this.tracker.getStatesByIds(activeIds);
+    } catch (err) {
+      this.logger.warn('runtime.transition.reconcile_state_refresh_failed', {
+        issue_id: undefined,
+        issue_identifier: undefined,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
     for (const itemId of activeIds) {
       const entry = this.running.get(itemId);
       if (!entry) continue;
@@ -207,7 +220,12 @@ export class PollingRuntime implements OrchestratorRuntime {
       if (state !== 'in_progress') {
         this.running.delete(itemId);
         this.claimed.delete(itemId);
-        this.scheduleRetry(entry.item, 'failure', `state_${state}`);
+        this.clearRetry(itemId);
+        this.logger.info('runtime.transition.reconcile_stopped_non_active', {
+          issue_id: entry.item.id,
+          issue_identifier: entry.item.identifier,
+          state,
+        });
       }
     }
   }

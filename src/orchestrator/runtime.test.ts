@@ -6,8 +6,17 @@ import type { NormalizedWorkItem, WorkItemState } from '../model/work-item.js';
 import { PollingRuntime } from './runtime.js';
 
 class FakeLogger implements Logger {
-  info(): void {}
-  warn(): void {}
+  public readonly infoLogs: Array<{ message: string; data?: Record<string, unknown> }> = [];
+  public readonly warnLogs: Array<{ message: string; data?: Record<string, unknown> }> = [];
+
+  info(message: string, data?: Record<string, unknown>): void {
+    this.infoLogs.push({ message, data });
+  }
+
+  warn(message: string, data?: Record<string, unknown>): void {
+    this.warnLogs.push({ message, data });
+  }
+
   error(): void {}
 }
 
@@ -17,6 +26,7 @@ class FakeTracker {
   public markInProgressCalls: string[] = [];
   public markDoneCalls: string[] = [];
   public failMarkInProgressFor = new Set<string>();
+  public failGetStatesByIds = false;
 
   async listEligibleItems(): Promise<NormalizedWorkItem[]> {
     return this.items;
@@ -31,6 +41,10 @@ class FakeTracker {
   }
 
   async getStatesByIds(itemIds: string[]): Promise<Record<string, WorkItemState>> {
+    if (this.failGetStatesByIds) {
+      throw new Error('state refresh failed');
+    }
+
     const result: Record<string, WorkItemState> = {};
     for (const id of itemIds) {
       const state = this.states[id];
@@ -151,5 +165,66 @@ describe('PollingRuntime state machine', () => {
     await runtime.tick();
     assert.equal(tracker.markInProgressCalls.length, 2);
     assert.deepEqual(runtime.snapshot().running, ['A']);
+  });
+
+  it('does not crash tick when state refresh fails and retries on next tick', async () => {
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+    tracker.states.A = 'in_progress';
+    const logger = new FakeLogger();
+
+    const runtime = new PollingRuntime(tracker, workflow, logger);
+
+    await runtime.tick();
+    tracker.failGetStatesByIds = true;
+    await runtime.tick();
+
+    assert.equal(runtime.snapshot().running.length, 1);
+    assert.ok(
+      logger.warnLogs.some((log) => log.message === 'runtime.transition.reconcile_state_refresh_failed'),
+    );
+
+    tracker.failGetStatesByIds = false;
+    await runtime.tick();
+    assert.equal(runtime.snapshot().running.length, 1);
+  });
+
+  it('disables stall detection when stallTimeoutMs is zero or less', async () => {
+    let now = 10_000;
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+    tracker.states.A = 'in_progress';
+
+    const runtime = new PollingRuntime(tracker, workflow, new FakeLogger(), {
+      now: () => now,
+      stallTimeoutMs: 0,
+    });
+
+    await runtime.tick();
+    now += 60 * 60 * 1000;
+    await runtime.tick();
+
+    assert.deepEqual(runtime.snapshot().running, ['A']);
+    assert.equal(runtime.snapshot().retryAttempts.A, undefined);
+  });
+
+  it('stops non-active running item without scheduling retry', async () => {
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+    tracker.states.A = 'in_progress';
+    const logger = new FakeLogger();
+
+    const runtime = new PollingRuntime(tracker, workflow, logger);
+
+    await runtime.tick();
+    tracker.states.A = 'todo';
+    tracker.items = [];
+    await runtime.tick();
+
+    assert.equal(runtime.snapshot().running.length, 0);
+    assert.equal(runtime.snapshot().retryAttempts.A, undefined);
+    assert.ok(
+      logger.infoLogs.some((log) => log.message === 'runtime.transition.reconcile_stopped_non_active'),
+    );
   });
 });
