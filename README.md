@@ -31,7 +31,7 @@ npm test
 - `src/config/runtime-config.ts` - canonical runtime config type
 - `src/config/resolver.ts` - typed config getters + defaults/env resolution/validation
 - `src/logging/logger.ts` - structured JSON logger baseline
-- `src/bootstrap.ts` - loader/tracker/logger を束ねて runtime を生成する初期化ヘルパー
+- `src/bootstrap.ts` - initialization helper that wires loader/tracker/logger and constructs the runtime
 
 ## Notes
 

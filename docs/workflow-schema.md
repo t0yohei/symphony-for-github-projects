@@ -1,6 +1,6 @@
 # WORKFLOW.md schema (GitHub Projects)
 
-このドキュメントは `WORKFLOW.md` の front matter 契約を定義する。
+This document defines the `WORKFLOW.md` front matter contract.
 
 ## Top-level keys
 
@@ -46,11 +46,11 @@ hooks:
 
 - `GITHUB_TOKEN` (or any variable name set in `tokenEnv`)
 
-`tokenEnv` に設定された環境変数は、実行環境で必ず解決できる必要がある。
+The environment variable configured in `tokenEnv` must always be resolvable in the runtime environment.
 
 ## Validation expectations (explicit + testable)
 
-`validateWorkflowContract` は以下のエラーコードを返す:
+`validateWorkflowContract` returns the following error codes:
 
 - `tracker.kind.required`
 - `tracker.kind.unsupported`
@@ -61,4 +61,4 @@ hooks:
 - `workspace.baseDir.required`
 - `agent.command.required`
 
-バリデーションは失敗を集約し、最初の1件で止めずに全エラーを返す。
+Validation aggregates failures and returns all errors instead of stopping at the first one.
