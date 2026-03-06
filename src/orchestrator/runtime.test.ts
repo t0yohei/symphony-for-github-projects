@@ -204,7 +204,7 @@ describe('PollingRuntime state machine', () => {
   });
 
   it('schedules retry when markDone fails in required done transition path', async () => {
-    let now = 3_000;
+    const now = 3_000;
     class FailingDoneTracker extends FakeTracker {
       override async markDone(itemId: string): Promise<void> {
         this.markDoneCalls.push(itemId);
