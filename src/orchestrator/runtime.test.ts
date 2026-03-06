@@ -285,4 +285,64 @@ describe('PollingRuntime state machine', () => {
     assert.equal(tracker.markInProgressCalls.length, 2);
     assert.ok(logger.infoLogs.some((log) => log.message === 'runtime.config.applied'));
   });
+
+  it('aggregates usage/runtime metrics and exposes detailed snapshot state', async () => {
+    let now = 5_000;
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101), item('B', 102)];
+    tracker.states.A = 'in_progress';
+    tracker.states.B = 'in_progress';
+
+    const logger = new FakeLogger();
+    const runtime = new PollingRuntime(
+      tracker,
+      {
+        ...workflow,
+        polling: { ...workflow.polling, maxConcurrency: 2 },
+      },
+      logger,
+      {
+        ...baseRuntimeOptions,
+        now: () => now,
+        continuationRetryDelayMs: 100,
+      },
+    );
+
+    await runtime.tick();
+    runtime.observeSession('A', {
+      sessionId: 'sess-a',
+      rateLimit: { code: 'rate_limited', retryAfterMs: 1200, message: 'slow down' },
+    });
+
+    now += 4_000;
+    await runtime.handleWorkerExit('A', 'completed', {
+      sessionId: 'sess-a',
+      usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+    });
+
+    now += 2_000;
+    await runtime.tick();
+    await runtime.handleWorkerExit('B', 'failed', {
+      sessionId: 'sess-b',
+      usage: { inputTokens: 3, outputTokens: 1, totalTokens: 4 },
+      rateLimit: { code: 'rate_limited', retryAfterMs: 900, message: 'retry later' },
+    });
+
+    const snapshot = runtime.snapshot();
+    assert.deepEqual(snapshot.usageTotals, {
+      inputTokens: 13,
+      outputTokens: 3,
+      totalTokens: 16,
+    });
+    assert.equal(snapshot.aggregateRuntimeSeconds, 10);
+    assert.equal(snapshot.latestRateLimit?.code, 'rate_limited');
+    assert.equal(snapshot.latestRateLimit?.retryAfterMs, 900);
+    assert.ok(snapshot.retryingDetails.some((entry) => entry.itemId === 'B' && entry.kind === 'failure'));
+    assert.ok(snapshot.runningDetails.every((entry) => typeof entry.issueIdentifier === 'string'));
+    assert.ok(
+      logger.infoLogs.some(
+        (log) => log.message === 'runtime.transition.metrics' && log.data?.session_id === 'sess-b',
+      ),
+    );
+  });
 });

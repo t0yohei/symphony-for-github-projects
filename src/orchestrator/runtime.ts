@@ -8,17 +8,43 @@ export interface OrchestratorRuntime {
   tick(): Promise<void>;
 }
 
+export interface RuntimeUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+export interface RuntimeRateLimitSnapshot {
+  code?: string;
+  resetAt?: string;
+  retryAfterMs?: number;
+  message?: string;
+  raw?: Record<string, unknown>;
+}
+
+export interface RuntimeObservationContext {
+  sessionId?: string;
+  usage?: Partial<RuntimeUsageTotals>;
+  rateLimit?: RuntimeRateLimitSnapshot;
+}
+
 export interface RuntimeStateSnapshot {
   running: string[];
   claimed: string[];
   retryAttempts: Record<string, number>;
   completed: string[];
+  runningDetails: Array<{ itemId: string; issueIdentifier: string; sessionId?: string }>;
+  retryingDetails: Array<{ itemId: string; issueIdentifier: string; attempt: number; kind: 'continuation' | 'failure'; dueAt: string }>;
+  usageTotals: RuntimeUsageTotals;
+  aggregateRuntimeSeconds: number;
+  latestRateLimit?: RuntimeRateLimitSnapshot;
 }
 
 interface RunningEntry {
   item: NormalizedWorkItem;
   startedAt: number;
   lastEventAt: number;
+  sessionId?: string;
 }
 
 interface RetryEntry {
@@ -54,6 +80,9 @@ export class PollingRuntime implements OrchestratorRuntime {
   private readonly claimed = new Set<string>();
   private readonly retry = new Map<string, RetryEntry>();
   private readonly completed = new Set<string>();
+  private readonly usageTotals: RuntimeUsageTotals = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  private aggregateRuntimeMs = 0;
+  private latestRateLimit?: RuntimeRateLimitSnapshot;
   private readonly now: () => number;
   private readonly stallTimeoutMs: number;
   private readonly continuationRetryDelayMs: number;
@@ -134,10 +163,77 @@ export class PollingRuntime implements OrchestratorRuntime {
     running.lastEventAt = this.now();
   }
 
-  async handleWorkerExit(itemId: string, result: 'completed' | 'failed'): Promise<void> {
+  observeSession(itemId: string, context: RuntimeObservationContext): void {
+    const running = this.running.get(itemId);
+    if (!running) return;
+
+    if (context.sessionId) {
+      running.sessionId = context.sessionId;
+    }
+
+    if (context.rateLimit) {
+      this.latestRateLimit = sanitizeRateLimit(context.rateLimit);
+    }
+  }
+
+  private observeWorkerExit(entry: RunningEntry, context?: RuntimeObservationContext): void {
+    const runtimeMs = Math.max(0, this.now() - entry.startedAt);
+    this.aggregateRuntimeMs += runtimeMs;
+
+    if (context?.sessionId) {
+      entry.sessionId = context.sessionId;
+    }
+
+    if (context?.rateLimit) {
+      this.latestRateLimit = sanitizeRateLimit(context.rateLimit);
+    }
+
+    const usage = context?.usage;
+    if (!usage) {
+      this.logger.info('runtime.transition.metrics', {
+        issue_id: entry.item.id,
+        issue_identifier: entry.item.identifier,
+        session_id: entry.sessionId,
+        runtime_seconds: Math.floor(runtimeMs / 1000),
+        aggregate_runtime_seconds: Math.floor(this.aggregateRuntimeMs / 1000),
+        usage_input_tokens: this.usageTotals.inputTokens,
+        usage_output_tokens: this.usageTotals.outputTokens,
+        usage_total_tokens: this.usageTotals.totalTokens,
+      });
+      return;
+    }
+
+    const inputTokens = toIntOrZero(usage.inputTokens);
+    const outputTokens = toIntOrZero(usage.outputTokens);
+    const reportedTotalTokens = toIntOrZero(usage.totalTokens);
+    const resolvedTotalTokens = Math.max(reportedTotalTokens, inputTokens + outputTokens);
+
+    this.usageTotals.inputTokens += inputTokens;
+    this.usageTotals.outputTokens += outputTokens;
+    this.usageTotals.totalTokens += resolvedTotalTokens;
+
+    this.logger.info('runtime.transition.metrics', {
+      issue_id: entry.item.id,
+      issue_identifier: entry.item.identifier,
+      session_id: entry.sessionId,
+      runtime_seconds: Math.floor(runtimeMs / 1000),
+      aggregate_runtime_seconds: Math.floor(this.aggregateRuntimeMs / 1000),
+      usage_input_tokens: this.usageTotals.inputTokens,
+      usage_output_tokens: this.usageTotals.outputTokens,
+      usage_total_tokens: this.usageTotals.totalTokens,
+      latest_rate_limit: this.latestRateLimit,
+    });
+  }
+
+  async handleWorkerExit(
+    itemId: string,
+    result: 'completed' | 'failed',
+    context?: RuntimeObservationContext,
+  ): Promise<void> {
     const entry = this.running.get(itemId);
     if (!entry) return;
 
+    this.observeWorkerExit(entry, context);
     this.running.delete(itemId);
     this.claimed.delete(itemId);
 
@@ -149,6 +245,7 @@ export class PollingRuntime implements OrchestratorRuntime {
         this.logger.info('runtime.transition.completed', {
           issue_id: entry.item.id,
           issue_identifier: entry.item.identifier,
+          session_id: entry.sessionId,
         });
         return;
       }
@@ -171,6 +268,21 @@ export class PollingRuntime implements OrchestratorRuntime {
       claimed: [...this.claimed],
       retryAttempts,
       completed: [...this.completed],
+      runningDetails: [...this.running.entries()].map(([itemId, entry]) => ({
+        itemId,
+        issueIdentifier: entry.item.identifier ?? `#${entry.item.number ?? itemId}`,
+        sessionId: entry.sessionId,
+      })),
+      retryingDetails: [...this.retry.entries()].map(([itemId, entry]) => ({
+        itemId,
+        issueIdentifier: entry.identifier,
+        attempt: entry.attempt,
+        kind: entry.kind,
+        dueAt: new Date(entry.dueAt).toISOString(),
+      })),
+      usageTotals: { ...this.usageTotals },
+      aggregateRuntimeSeconds: Math.floor(this.aggregateRuntimeMs / 1000),
+      latestRateLimit: this.latestRateLimit,
     };
   }
 
@@ -271,6 +383,7 @@ export class PollingRuntime implements OrchestratorRuntime {
         this.logger.info('runtime.transition.reconcile_done', {
           issue_id: entry.item.id,
           issue_identifier: entry.item.identifier,
+          session_id: entry.sessionId,
         });
         continue;
       }
@@ -282,6 +395,7 @@ export class PollingRuntime implements OrchestratorRuntime {
         this.logger.info('runtime.transition.reconcile_stopped_non_active', {
           issue_id: entry.item.id,
           issue_identifier: entry.item.identifier,
+          session_id: entry.sessionId,
           state,
         });
       }
@@ -353,6 +467,7 @@ export class PollingRuntime implements OrchestratorRuntime {
       this.logger.info('runtime.transition.running', {
         issue_id: item.id,
         issue_identifier: item.identifier,
+        session_id: undefined,
       });
       return true;
     } catch (err) {
@@ -440,6 +555,21 @@ export class PollingRuntime implements OrchestratorRuntime {
     }
     return Math.max(0, Math.floor(configured));
   }
+}
+
+function toIntOrZero(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
+}
+
+function sanitizeRateLimit(payload: RuntimeRateLimitSnapshot): RuntimeRateLimitSnapshot {
+  return {
+    code: typeof payload.code === 'string' && payload.code.trim() ? payload.code : undefined,
+    resetAt: typeof payload.resetAt === 'string' && payload.resetAt.trim() ? payload.resetAt : undefined,
+    retryAfterMs: toIntOrZero(payload.retryAfterMs),
+    message: typeof payload.message === 'string' && payload.message.trim() ? payload.message : undefined,
+    raw: payload.raw,
+  };
 }
 
 function defaultCommandExists(command: string): boolean {
