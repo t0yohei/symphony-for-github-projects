@@ -126,6 +126,7 @@ describe("GitHubProjectsAdapter", () => {
     const mapped = {
       A: item("A", 1, "In Progress", []),
       B: item("B", 2, "Blocked", []),
+      C: item("C", 3, "Cancelled", []),
     };
     const adapter = new GitHubProjectsAdapter({
       owner: "o",
@@ -133,8 +134,30 @@ describe("GitHubProjectsAdapter", () => {
       client: new FakeClient([], mapped),
     });
 
-    const states = await adapter.getStatesByIds(["A", "B"]);
-    assert.deepEqual(states, { A: "in_progress", B: "blocked" });
+    const states = await adapter.getStatesByIds(["A", "B", "C"]);
+    assert.deepEqual(states, { A: "in_progress", B: "blocked", C: "done" });
+  });
+
+  it('uses configured active states when listing candidates', async () => {
+    const client = new FakeClient([
+      {
+        items: [item('A', 101, 'Todo', []), item('B', 102, 'Review', [])],
+        hasNextPage: false,
+        endCursor: null,
+      },
+    ]);
+
+    const adapter = new GitHubProjectsAdapter({
+      owner: 'o',
+      projectNumber: 1,
+      client,
+      activeStates: ['review'],
+    });
+
+    const candidates = await adapter.listCandidateItems();
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].id, 'B');
+    assert.equal(candidates[0].state, 'review');
   });
 
   it("throws malformed payload error when issue content is missing", async () => {

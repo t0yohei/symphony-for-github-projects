@@ -1,4 +1,4 @@
-export type WorkItemState = "todo" | "in_progress" | "blocked" | "done";
+export type WorkItemState = "todo" | "in_progress" | "blocked" | "done" | (string & {});
 
 export interface NormalizedWorkItem {
   id: string;
@@ -30,13 +30,16 @@ const STATE_ALIAS: Record<string, WorkItemState> = {
   done: "done",
   completed: "done",
   closed: "done",
+  cancelled: "done",
+  canceled: "done",
+  duplicate: "done",
 };
 
 export function normalizeState(value: string): WorkItemState {
   const normalized = value.trim().toLowerCase();
   const mapped = STATE_ALIAS[normalized];
   if (!mapped) {
-    return "todo";
+    return normalized as WorkItemState;
   }
   return mapped;
 }

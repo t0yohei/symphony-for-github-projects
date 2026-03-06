@@ -90,6 +90,7 @@ function createTrackerFromWorkflow(workflow: LoadedWorkflowContract): TrackerAda
     projectNumber,
     client: projectsClient,
     writer,
+    activeStates: resolveActiveStates(workflow),
   });
 }
 
@@ -111,6 +112,20 @@ function resolveStatusOptions(workflow: LoadedWorkflowContract): Partial<StatusO
     inProgress,
     done,
   };
+}
+
+function resolveActiveStates(workflow: LoadedWorkflowContract): string[] | undefined {
+  const raw = (workflow.extensions?.github_projects as Record<string, unknown> | undefined)?.active_states;
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+
+  const values = raw
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+
+  return values.length > 0 ? values : undefined;
 }
 
 const projectIdCache = new Map<string, string>();

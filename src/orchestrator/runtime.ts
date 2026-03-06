@@ -262,7 +262,7 @@ export class PollingRuntime implements OrchestratorRuntime {
 
     if (result === 'completed') {
       const states = await this.tracker.getStatesByIds([itemId]);
-      if (states[itemId] === 'done') {
+      if (this.isTerminalState(states[itemId])) {
         this.completed.add(itemId);
         this.clearRetry(itemId);
         this.logger.info('runtime.transition.completed', {
@@ -425,7 +425,7 @@ export class PollingRuntime implements OrchestratorRuntime {
         continue;
       }
 
-      if (state === 'done') {
+      if (this.isTerminalState(state)) {
         this.running.delete(itemId);
         this.claimed.delete(itemId);
         this.completed.add(itemId);
@@ -434,11 +434,12 @@ export class PollingRuntime implements OrchestratorRuntime {
           issue_id: entry.item.id,
           issue_identifier: entry.item.identifier,
           session_id: entry.sessionId,
+          state,
         });
         continue;
       }
 
-      if (state !== 'in_progress') {
+      if (!this.isActiveState(state)) {
         this.running.delete(itemId);
         this.claimed.delete(itemId);
         this.clearRetry(itemId);
@@ -654,7 +655,7 @@ export class PollingRuntime implements OrchestratorRuntime {
 
     const blocked = new Set<string>();
     for (const item of withBlockers) {
-      const hasNonTerminal = (item.blocked_by ?? []).some((id) => !isTerminalState(states[id]));
+      const hasNonTerminal = (item.blocked_by ?? []).some((id) => !this.isTerminalState(states[id]));
       if (hasNonTerminal) {
         blocked.add(item.id);
       }
@@ -669,13 +670,51 @@ export class PollingRuntime implements OrchestratorRuntime {
     }
 
     const states = await this.tracker.getStatesByIds(item.blocked_by ?? []);
-    return (item.blocked_by ?? []).some((id) => !isTerminalState(states[id]));
+    return (item.blocked_by ?? []).some((id) => !this.isTerminalState(states[id]));
   }
 
   private shouldMarkDoneOnCompletion(): boolean {
     const value = (this.workflow.extensions?.github_projects as Record<string, unknown> | undefined)
       ?.mark_done_on_completion;
     return value === true;
+  }
+
+  private isActiveState(state: WorkItemState | undefined): boolean {
+    if (!state) return false;
+    return this.resolveActiveStates().has(normalizeStateKey(state));
+  }
+
+  private isTerminalState(state: WorkItemState | undefined): boolean {
+    if (!state) return false;
+    return this.resolveTerminalStates().has(normalizeStateKey(state));
+  }
+
+  private resolveActiveStates(): Set<string> {
+    const defaults = ['todo', 'in_progress', 'blocked'];
+    return this.resolveConfiguredStates('active_states', defaults);
+  }
+
+  private resolveTerminalStates(): Set<string> {
+    const defaults = ['done'];
+    return this.resolveConfiguredStates('terminal_states', defaults);
+  }
+
+  private resolveConfiguredStates(key: 'active_states' | 'terminal_states', defaults: string[]): Set<string> {
+    const raw = (this.workflow.extensions?.github_projects as Record<string, unknown> | undefined)?.[key];
+    if (!Array.isArray(raw)) {
+      return new Set(defaults);
+    }
+
+    const normalized = raw
+      .filter((value): value is string => typeof value === 'string')
+      .map((value) => normalizeStateKey(value))
+      .filter((value) => value.length > 0);
+
+    if (normalized.length === 0) {
+      return new Set(defaults);
+    }
+
+    return new Set(normalized);
   }
 }
 
@@ -708,8 +747,8 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function isTerminalState(state: WorkItemState | undefined): boolean {
-  return state === 'done' || state === 'blocked';
+function normalizeStateKey(state: string): string {
+  return state.trim().toLowerCase();
 }
 
 function sortCandidates(items: NormalizedWorkItem[]): NormalizedWorkItem[] {

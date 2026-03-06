@@ -294,7 +294,7 @@ describe('PollingRuntime state machine', () => {
     const runtime = new PollingRuntime(tracker, workflow, logger, baseRuntimeOptions);
 
     await runtime.tick();
-    tracker.states.A = 'todo';
+    tracker.states.A = 'review';
     tracker.items = [];
     await runtime.tick();
 
@@ -302,6 +302,71 @@ describe('PollingRuntime state machine', () => {
     assert.equal(runtime.snapshot().retryAttempts.A, undefined);
     assert.ok(
       logger.infoLogs.some((log) => log.message === 'runtime.transition.reconcile_stopped_non_active'),
+    );
+  });
+
+  it('treats configured terminal state as completion during reconcile', async () => {
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+    tracker.states.A = 'in_progress';
+
+    const runtime = new PollingRuntime(
+      tracker,
+      {
+        ...workflow,
+        extensions: {
+          github_projects: {
+            terminal_states: ['Done', 'Closed', 'Cancelled', 'Canceled', 'Duplicate'],
+          },
+        },
+      },
+      new FakeLogger(),
+      baseRuntimeOptions,
+    );
+
+    await runtime.tick();
+    tracker.states.A = 'duplicate';
+    tracker.items = [];
+    await runtime.tick();
+
+    assert.equal(runtime.snapshot().running.length, 0);
+    assert.deepEqual(runtime.snapshot().completed, ['A']);
+  });
+
+  it('stops unknown state without cleanup when not active and not terminal', async () => {
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+    tracker.states.A = 'in_progress';
+    const logger = new FakeLogger();
+
+    const runtime = new PollingRuntime(
+      tracker,
+      {
+        ...workflow,
+        extensions: {
+          github_projects: {
+            active_states: ['todo', 'in_progress'],
+            terminal_states: ['done', 'closed'],
+          },
+        },
+      },
+      logger,
+      baseRuntimeOptions,
+    );
+
+    await runtime.tick();
+    tracker.states.A = 'triaged';
+    tracker.items = [];
+    await runtime.tick();
+
+    assert.equal(runtime.snapshot().running.length, 0);
+    assert.deepEqual(runtime.snapshot().completed, []);
+    assert.ok(
+      logger.infoLogs.some(
+        (log) =>
+          log.message === 'runtime.transition.reconcile_stopped_non_active' &&
+          log.data?.state === 'triaged',
+      ),
     );
   });
 

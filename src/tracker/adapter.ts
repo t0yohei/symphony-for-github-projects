@@ -26,6 +26,7 @@ export interface GitHubProjectsAdapterOptions {
   client: GitHubProjectsClient;
   writer?: TrackerWriter;
   pageSize?: number;
+  activeStates?: WorkItemState[];
 }
 
 export class GitHubProjectsAdapter implements TrackerAdapter {
@@ -34,6 +35,7 @@ export class GitHubProjectsAdapter implements TrackerAdapter {
   private readonly client: GitHubProjectsClient;
   private readonly writer?: TrackerWriter;
   private readonly defaultPageSize: number;
+  private readonly defaultActiveStates: WorkItemState[];
 
   constructor(options: GitHubProjectsAdapterOptions) {
     this.owner = options.owner;
@@ -41,6 +43,10 @@ export class GitHubProjectsAdapter implements TrackerAdapter {
     this.client = options.client;
     this.writer = options.writer;
     this.defaultPageSize = options.pageSize ?? 50;
+    this.defaultActiveStates =
+      options.activeStates && options.activeStates.length > 0
+        ? [...options.activeStates]
+        : ['todo', 'in_progress', 'blocked'];
   }
 
   async listEligibleItems(): Promise<NormalizedWorkItem[]> {
@@ -51,7 +57,7 @@ export class GitHubProjectsAdapter implements TrackerAdapter {
     pageSize?: number;
     activeStates?: WorkItemState[];
   }): Promise<NormalizedWorkItem[]> {
-    const activeStates = options?.activeStates ?? ["todo", "in_progress", "blocked"];
+    const activeStates = options?.activeStates ?? this.defaultActiveStates;
     return this.listItemsByStates(activeStates, { pageSize: options?.pageSize });
   }
 
@@ -60,7 +66,7 @@ export class GitHubProjectsAdapter implements TrackerAdapter {
     options?: { pageSize?: number },
   ): Promise<NormalizedWorkItem[]> {
     const pageSize = options?.pageSize ?? this.defaultPageSize;
-    const target = new Set(states);
+    const target = new Set(states.map((state) => normalizeState(String(state))));
     const acc: NormalizedWorkItem[] = [];
 
     let after: string | undefined;
