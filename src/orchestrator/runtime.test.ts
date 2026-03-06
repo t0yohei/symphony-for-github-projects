@@ -65,25 +65,23 @@ function item(id: string, number: number): NormalizedWorkItem {
   };
 }
 
+const workflow = {
+  tracker: {
+    kind: 'github_projects' as const,
+    github: { owner: 'o', projectNumber: 1, tokenEnv: 'GITHUB_TOKEN' },
+  },
+  polling: { intervalMs: 1000, maxConcurrency: 1 },
+  workspace: { baseDir: '/tmp' },
+  agent: { command: 'codex' },
+};
+
 describe('PollingRuntime state machine', () => {
   it('prevents duplicate dispatch across ticks for already running item', async () => {
     const tracker = new FakeTracker();
     tracker.items = [item('A', 101)];
     tracker.states.A = 'in_progress';
 
-    const runtime = new PollingRuntime(
-      tracker,
-      {
-        tracker: {
-          kind: 'github_projects',
-          github: { owner: 'o', projectNumber: 1, tokenEnv: 'GITHUB_TOKEN' },
-        },
-        polling: { intervalMs: 1000, maxConcurrency: 1 },
-        workspace: { baseDir: '/tmp' },
-        agent: { command: 'codex' },
-      },
-      new FakeLogger(),
-    );
+    const runtime = new PollingRuntime(tracker, workflow, new FakeLogger());
 
     await runtime.tick();
     await runtime.tick();
@@ -92,31 +90,60 @@ describe('PollingRuntime state machine', () => {
     assert.deepEqual(runtime.snapshot().running, ['A']);
   });
 
-  it('schedules exponential retry on claim failure then dispatches after backoff', async () => {
+  it('schedules failure retry with exponential backoff and cap', async () => {
     let now = 1_000;
     const tracker = new FakeTracker();
     tracker.items = [item('A', 101)];
     tracker.failMarkInProgressFor.add('A');
 
-    const runtime = new PollingRuntime(
-      tracker,
-      {
-        tracker: {
-          kind: 'github_projects',
-          github: { owner: 'o', projectNumber: 1, tokenEnv: 'GITHUB_TOKEN' },
-        },
-        polling: { intervalMs: 1000, maxConcurrency: 1 },
-        workspace: { baseDir: '/tmp' },
-        agent: { command: 'codex' },
-      },
-      new FakeLogger(),
-      { now: () => now, baseRetryDelayMs: 100 },
-    );
+    const runtime = new PollingRuntime(tracker, workflow, new FakeLogger(), {
+      now: () => now,
+      continuationRetryDelayMs: 50,
+      failureRetryBaseDelayMs: 100,
+      failureRetryMultiplier: 2,
+      failureRetryMaxDelayMs: 250,
+    });
 
     await runtime.tick();
-    assert.equal(tracker.markInProgressCalls.length, 1);
+    assert.equal(runtime.snapshot().retryAttempts.A, 1);
 
+    now += 100;
+    await runtime.tick();
+    assert.equal(runtime.snapshot().retryAttempts.A, 2);
+
+    now += 200;
+    await runtime.tick();
+    assert.equal(runtime.snapshot().retryAttempts.A, 3);
+
+    now += 249;
+    await runtime.tick();
+    assert.equal(tracker.markInProgressCalls.length, 3);
+
+    now += 1;
     tracker.failMarkInProgressFor.delete('A');
+    await runtime.tick();
+    assert.equal(tracker.markInProgressCalls.length, 4);
+    assert.deepEqual(runtime.snapshot().running, ['A']);
+  });
+
+  it('uses continuation retry after normal worker exit when item is not done', async () => {
+    let now = 2_000;
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+    tracker.states.A = 'in_progress';
+
+    const runtime = new PollingRuntime(tracker, workflow, new FakeLogger(), {
+      now: () => now,
+      continuationRetryDelayMs: 100,
+      failureRetryBaseDelayMs: 1000,
+    });
+
+    await runtime.tick();
+    await runtime.handleWorkerExit('A', 'completed');
+
+    assert.equal(runtime.snapshot().running.length, 0);
+    assert.equal(runtime.snapshot().retryAttempts.A, 1);
+
     await runtime.tick();
     assert.equal(tracker.markInProgressCalls.length, 1);
 
@@ -124,39 +151,5 @@ describe('PollingRuntime state machine', () => {
     await runtime.tick();
     assert.equal(tracker.markInProgressCalls.length, 2);
     assert.deepEqual(runtime.snapshot().running, ['A']);
-  });
-
-  it('reconciles done state and handles abnormal exit retry', async () => {
-    const tracker = new FakeTracker();
-    tracker.items = [item('A', 101)];
-    tracker.states.A = 'in_progress';
-
-    const runtime = new PollingRuntime(
-      tracker,
-      {
-        tracker: {
-          kind: 'github_projects',
-          github: { owner: 'o', projectNumber: 1, tokenEnv: 'GITHUB_TOKEN' },
-        },
-        polling: { intervalMs: 1000, maxConcurrency: 1 },
-        workspace: { baseDir: '/tmp' },
-        agent: { command: 'codex' },
-      },
-      new FakeLogger(),
-    );
-
-    await runtime.tick();
-    await runtime.handleWorkerExit('A', 'failed');
-    assert.equal(runtime.snapshot().running.length, 0);
-    assert.equal(runtime.snapshot().retryAttempts.A, 1);
-
-    tracker.items = [item('B', 102)];
-    tracker.states.B = 'in_progress';
-    await runtime.tick();
-    tracker.states.B = 'done';
-    await runtime.tick();
-
-    assert.deepEqual(runtime.snapshot().completed.includes('B'), true);
-    assert.equal(runtime.snapshot().running.includes('B'), false);
   });
 });

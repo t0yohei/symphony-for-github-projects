@@ -21,18 +21,30 @@ interface RunningEntry {
 }
 
 interface RetryEntry {
-  attempts: number;
-  nextEligibleAt: number;
+  issueId: string;
+  identifier: string;
+  item: NormalizedWorkItem;
+  attempt: number;
+  dueAt: number;
+  timer?: ReturnType<typeof setTimeout>;
+  error?: string;
+  kind: 'continuation' | 'failure';
 }
 
 export interface PollingRuntimeOptions {
   now?: () => number;
   stallTimeoutMs?: number;
-  baseRetryDelayMs?: number;
+  continuationRetryDelayMs?: number;
+  failureRetryBaseDelayMs?: number;
+  failureRetryMultiplier?: number;
+  failureRetryMaxDelayMs?: number;
 }
 
 const DEFAULT_STALL_TIMEOUT_MS = 5 * 60 * 1000;
-const DEFAULT_BASE_RETRY_DELAY_MS = 10 * 1000;
+const DEFAULT_CONTINUATION_RETRY_DELAY_MS = 1_000;
+const DEFAULT_FAILURE_RETRY_BASE_DELAY_MS = 1_000;
+const DEFAULT_FAILURE_RETRY_MULTIPLIER = 2;
+const DEFAULT_FAILURE_RETRY_MAX_DELAY_MS = 60_000;
 
 export class PollingRuntime implements OrchestratorRuntime {
   private readonly running = new Map<string, RunningEntry>();
@@ -41,7 +53,10 @@ export class PollingRuntime implements OrchestratorRuntime {
   private readonly completed = new Set<string>();
   private readonly now: () => number;
   private readonly stallTimeoutMs: number;
-  private readonly baseRetryDelayMs: number;
+  private readonly continuationRetryDelayMs: number;
+  private readonly failureRetryBaseDelayMs: number;
+  private readonly failureRetryMultiplier: number;
+  private readonly failureRetryMaxDelayMs: number;
 
   constructor(
     private readonly tracker: TrackerAdapter,
@@ -51,11 +66,17 @@ export class PollingRuntime implements OrchestratorRuntime {
   ) {
     this.now = options.now ?? (() => Date.now());
     this.stallTimeoutMs = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
-    this.baseRetryDelayMs = options.baseRetryDelayMs ?? DEFAULT_BASE_RETRY_DELAY_MS;
+    this.continuationRetryDelayMs =
+      options.continuationRetryDelayMs ?? DEFAULT_CONTINUATION_RETRY_DELAY_MS;
+    this.failureRetryBaseDelayMs =
+      options.failureRetryBaseDelayMs ?? DEFAULT_FAILURE_RETRY_BASE_DELAY_MS;
+    this.failureRetryMultiplier = options.failureRetryMultiplier ?? DEFAULT_FAILURE_RETRY_MULTIPLIER;
+    this.failureRetryMaxDelayMs = options.failureRetryMaxDelayMs ?? DEFAULT_FAILURE_RETRY_MAX_DELAY_MS;
   }
 
   async tick(): Promise<void> {
     await this.reconcile();
+    await this.fireDueRetries();
 
     const maxConcurrency = this.resolveMaxConcurrency();
     if (maxConcurrency <= 0) {
@@ -106,31 +127,28 @@ export class PollingRuntime implements OrchestratorRuntime {
     this.claimed.delete(itemId);
 
     if (result === 'completed') {
-      this.completed.add(itemId);
-      this.retry.delete(itemId);
-      this.logger.info('runtime.transition.completed', {
-        issue_id: entry.item.id,
-        issue_identifier: entry.item.identifier,
-      });
-      try {
-        await this.tracker.markDone(itemId);
-      } catch (err) {
-        this.logger.warn('runtime.mark_done_failed', {
+      const states = await this.tracker.getStatesByIds([itemId]);
+      if (states[itemId] === 'done') {
+        this.completed.add(itemId);
+        this.clearRetry(itemId);
+        this.logger.info('runtime.transition.completed', {
           issue_id: entry.item.id,
           issue_identifier: entry.item.identifier,
-          error: err instanceof Error ? err.message : String(err),
         });
+        return;
       }
+
+      this.scheduleRetry(entry.item, 'continuation', 'worker_exit_completed');
       return;
     }
 
-    this.scheduleRetry(itemId, entry.item, 'worker_exit_failed');
+    this.scheduleRetry(entry.item, 'failure', 'worker_exit_failed');
   }
 
   snapshot(): RuntimeStateSnapshot {
     const retryAttempts: Record<string, number> = {};
     for (const [id, entry] of this.retry.entries()) {
-      retryAttempts[id] = entry.attempts;
+      retryAttempts[id] = entry.attempt;
     }
 
     return {
@@ -152,7 +170,7 @@ export class PollingRuntime implements OrchestratorRuntime {
       if (now - entry.lastEventAt > this.stallTimeoutMs) {
         this.running.delete(itemId);
         this.claimed.delete(itemId);
-        this.scheduleRetry(itemId, entry.item, 'stalled');
+        this.scheduleRetry(entry.item, 'failure', 'stalled');
       }
     }
 
@@ -170,7 +188,7 @@ export class PollingRuntime implements OrchestratorRuntime {
       if (!state) {
         this.running.delete(itemId);
         this.claimed.delete(itemId);
-        this.scheduleRetry(itemId, entry.item, 'state_missing');
+        this.scheduleRetry(entry.item, 'failure', 'state_missing');
         continue;
       }
 
@@ -178,7 +196,7 @@ export class PollingRuntime implements OrchestratorRuntime {
         this.running.delete(itemId);
         this.claimed.delete(itemId);
         this.completed.add(itemId);
-        this.retry.delete(itemId);
+        this.clearRetry(itemId);
         this.logger.info('runtime.transition.reconcile_done', {
           issue_id: entry.item.id,
           issue_identifier: entry.item.identifier,
@@ -189,9 +207,51 @@ export class PollingRuntime implements OrchestratorRuntime {
       if (state !== 'in_progress') {
         this.running.delete(itemId);
         this.claimed.delete(itemId);
-        this.scheduleRetry(itemId, entry.item, `state_${state}`);
+        this.scheduleRetry(entry.item, 'failure', `state_${state}`);
       }
     }
+  }
+
+  private async fireDueRetries(): Promise<void> {
+    const dueEntries = [...this.retry.values()]
+      .filter((entry) => this.now() >= entry.dueAt)
+      .sort((a, b) => a.dueAt - b.dueAt);
+
+    for (const entry of dueEntries) {
+      await this.onRetryFire(entry.issueId);
+    }
+  }
+
+  private async onRetryFire(itemId: string): Promise<void> {
+    const entry = this.retry.get(itemId);
+    if (!entry) return;
+
+    if (this.completed.has(itemId) || this.running.has(itemId)) {
+      this.clearRetry(itemId);
+      return;
+    }
+
+    const eligible = await this.findEligibleItem(itemId);
+    if (!eligible) {
+      this.claimed.delete(itemId);
+      this.clearRetry(itemId);
+      return;
+    }
+
+    const maxConcurrency = this.resolveMaxConcurrency();
+    const capacity = Math.max(0, maxConcurrency - this.running.size);
+    if (capacity <= 0) {
+      this.claimed.delete(itemId);
+      this.scheduleRetry(eligible, 'continuation', 'retry_fire_no_slot');
+      return;
+    }
+
+    await this.dispatch(eligible);
+  }
+
+  private async findEligibleItem(itemId: string): Promise<NormalizedWorkItem | undefined> {
+    const candidates = await this.tracker.listEligibleItems();
+    return candidates.find((item) => item.id === itemId);
   }
 
   private async dispatch(item: NormalizedWorkItem): Promise<boolean> {
@@ -213,7 +273,7 @@ export class PollingRuntime implements OrchestratorRuntime {
         startedAt: now,
         lastEventAt: now,
       });
-      this.retry.delete(item.id);
+      this.clearRetry(item.id);
       this.logger.info('runtime.transition.running', {
         issue_id: item.id,
         issue_identifier: item.identifier,
@@ -221,7 +281,7 @@ export class PollingRuntime implements OrchestratorRuntime {
       return true;
     } catch (err) {
       this.claimed.delete(item.id);
-      this.scheduleRetry(item.id, item, 'claim_failed');
+      this.scheduleRetry(item, 'failure', 'claim_failed', err instanceof Error ? err.message : String(err));
       this.logger.warn('runtime.transition.claim_failed', {
         issue_id: item.id,
         issue_identifier: item.identifier,
@@ -231,21 +291,60 @@ export class PollingRuntime implements OrchestratorRuntime {
     }
   }
 
-  private scheduleRetry(itemId: string, item: NormalizedWorkItem, reason: string): void {
+  private scheduleRetry(
+    item: NormalizedWorkItem,
+    kind: 'continuation' | 'failure',
+    reason: string,
+    error?: string,
+  ): void {
+    const itemId = item.id;
     const current = this.retry.get(itemId);
-    const attempts = (current?.attempts ?? 0) + 1;
-    const delay = this.baseRetryDelayMs * 2 ** Math.max(0, attempts - 1);
-    this.retry.set(itemId, {
-      attempts,
-      nextEligibleAt: this.now() + delay,
-    });
+    if (current?.timer) {
+      clearTimeout(current.timer);
+    }
+
+    const attempt = (current?.attempt ?? 0) + 1;
+    const delay =
+      kind === 'continuation'
+        ? this.continuationRetryDelayMs
+        : Math.min(
+            this.failureRetryMaxDelayMs,
+            Math.floor(this.failureRetryBaseDelayMs * this.failureRetryMultiplier ** Math.max(0, attempt - 1)),
+          );
+
+    const dueAt = this.now() + delay;
+    const next: RetryEntry = {
+      issueId: item.id,
+      identifier: item.identifier ?? `#${item.number ?? item.id}`,
+      item,
+      attempt,
+      dueAt,
+      timer: setTimeout(() => {
+        void this.onRetryFire(item.id);
+      }, delay),
+      error,
+      kind,
+    };
+
+    this.retry.set(itemId, next);
     this.logger.info('runtime.transition.retry', {
-      issue_id: item.id,
-      issue_identifier: item.identifier,
+      issue_id: next.issueId,
+      issue_identifier: next.identifier,
       reason,
-      retry_attempt: attempts,
+      retry_attempt: next.attempt,
+      due_at: new Date(next.dueAt).toISOString(),
       nextEligibleInMs: delay,
+      kind,
+      error,
     });
+  }
+
+  private clearRetry(itemId: string): void {
+    const existing = this.retry.get(itemId);
+    if (existing?.timer) {
+      clearTimeout(existing.timer);
+    }
+    this.retry.delete(itemId);
   }
 
   private isDispatchable(itemId: string): boolean {
@@ -255,7 +354,7 @@ export class PollingRuntime implements OrchestratorRuntime {
 
     const retry = this.retry.get(itemId);
     if (!retry) return true;
-    return this.now() >= retry.nextEligibleAt;
+    return this.now() >= retry.dueAt;
   }
 
   private resolveMaxConcurrency(): number {
