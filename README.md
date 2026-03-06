@@ -2,19 +2,49 @@
 
 TypeScript scaffold for a Symphony-compatible orchestrator targeting GitHub Projects.
 
-## Setup
+## Quickstart
 
 ```bash
 npm install
+cp .env.example .env
+npm run lint
+npm run test
+npm run build
 ```
 
 ## Commands
 
 ```bash
-npm run build
+npm run lint
+npm run format
+npm run format:check
 npm run typecheck
-npm test
+npm run test
+npm run build
 ```
+
+## CI
+
+GitHub Actions runs on PRs and `main` pushes with:
+
+- `npm ci`
+- `npm run lint`
+- `npm run test`
+- `npm run build`
+
+Workflow file: `.github/workflows/ci.yml`
+
+## Environment
+
+Copy `.env.example` to `.env` and fill required values.
+
+Key variables:
+
+- `GITHUB_TOKEN`
+- `GITHUB_PROJECT_OWNER`
+- `GITHUB_PROJECT_NUMBER`
+- `WORKFLOW_PATH`
+- `LOG_LEVEL`
 
 ## WORKFLOW.md schema (Issue #2)
 

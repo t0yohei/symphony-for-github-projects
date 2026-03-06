@@ -30,11 +30,11 @@ export async function bootstrapFromWorkflow(
   const workflow = await workflowLoader.load(workflowPath);
   const runtime = new PollingRuntime(tracker, workflow, logger);
 
-  logger.info("bootstrap.ready", {
+  logger.info('bootstrap.ready', {
     workflowPath,
-    tracker: "github-projects",
-    maxConcurrency: workflow.maxConcurrency,
-    pollIntervalMs: workflow.pollIntervalMs,
+    tracker: workflow.tracker.kind,
+    maxConcurrency: workflow.polling.maxConcurrency ?? 1,
+    pollIntervalMs: workflow.polling.intervalMs,
   });
 
   return {

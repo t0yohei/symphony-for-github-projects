@@ -8,11 +8,24 @@ import type { WorkflowContract, WorkflowLoader } from "./workflow/contract.js";
 class StubWorkflowLoader implements WorkflowLoader {
   async load(_path: string): Promise<WorkflowContract> {
     return {
-      name: "sample",
-      version: "0.1",
-      tracker: "github-projects",
-      pollIntervalMs: 60_000,
-      maxConcurrency: 2,
+      tracker: {
+        kind: 'github_projects',
+        github: {
+          owner: 'kouka-t0yohei',
+          projectNumber: 1,
+          tokenEnv: 'GITHUB_TOKEN',
+        },
+      },
+      polling: {
+        intervalMs: 60_000,
+        maxConcurrency: 2,
+      },
+      workspace: {
+        baseDir: './tmp/workspaces',
+      },
+      agent: {
+        command: 'codex',
+      },
     };
   }
 }
@@ -37,7 +50,7 @@ test("bootstrapFromWorkflow wires runtime and emits bootstrap log", async () => 
     logger,
   });
 
-  assert.equal(result.workflow.name, "sample");
+  assert.equal(result.workflow.tracker.kind, 'github_projects');
   assert.equal(typeof result.runtime.tick, "function");
 
   const bootstrapLog = logger.messages.find((entry) => entry.message === "bootstrap.ready");
