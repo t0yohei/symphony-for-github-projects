@@ -7,157 +7,208 @@ export interface OrchestratorRuntime {
   tick(): Promise<void>;
 }
 
-export interface RuntimeMetrics {
-  ticks: number;
-  dispatched: number;
-  dispatchFailures: number;
-  reconciledDroppedClaims: number;
-  reconciledDroppedRunning: number;
+type ActiveStatus = "claimed" | "running";
+
+interface ItemRuntimeState {
+  item: NormalizedWorkItem;
+  status: ActiveStatus | "waiting_retry";
+  attempts: number;
+  nextAttemptAt?: number;
+  lastError?: string;
 }
 
-export interface RuntimeStateSnapshot {
-  claimed: string[];
-  running: string[];
-  retryAttempts: Record<string, number>;
-  metrics: RuntimeMetrics;
+export interface PollingRuntimeOptions {
+  maxRetryAttempts?: number;
+  baseRetryDelayMs?: number;
+  now?: () => number;
 }
-
-type RuntimeItemState = "idle" | "claimed" | "running";
-type RuntimeEvent =
-  | "claim"
-  | "dispatchSucceeded"
-  | "dispatchFailed"
-  | "reconcileLostEligibility";
 
 export class PollingRuntime implements OrchestratorRuntime {
-  private readonly itemStates = new Map<string, RuntimeItemState>();
-  private readonly claimed = new Set<string>();
-  private readonly running = new Set<string>();
-  private readonly retryAttempts = new Map<string, number>();
-  private readonly metrics: RuntimeMetrics = {
-    ticks: 0,
-    dispatched: 0,
-    dispatchFailures: 0,
-    reconciledDroppedClaims: 0,
-    reconciledDroppedRunning: 0,
-  };
+  private readonly states = new Map<string, ItemRuntimeState>();
+  private readonly maxRetryAttempts: number;
+  private readonly baseRetryDelayMs: number;
+  private readonly now: () => number;
 
   constructor(
     private readonly tracker: TrackerAdapter,
     private readonly workflow: WorkflowContract,
     private readonly logger: Logger,
-  ) {}
+    options: PollingRuntimeOptions = {},
+  ) {
+    this.maxRetryAttempts = options.maxRetryAttempts ?? 3;
+    this.baseRetryDelayMs = options.baseRetryDelayMs ?? 1000;
+    this.now = options.now ?? (() => Date.now());
+  }
 
   async tick(): Promise<void> {
-    this.metrics.ticks += 1;
+    const items = await this.tracker.listEligibleItems();
+    const eligibleById = new Map(items.map((item) => [item.id, item]));
 
-    const eligible = await this.tracker.listEligibleItems();
-    this.reconcile(eligible);
+    this.releaseIneligibleItems(eligibleById);
 
     const maxConcurrency = this.workflow.polling.maxConcurrency ?? 1;
-    const slots = Math.max(0, maxConcurrency - this.running.size);
-    const candidates = eligible.filter(
-      (item) => !this.running.has(item.id) && !this.claimed.has(item.id),
-    );
-    const selected = candidates.slice(0, slots);
+    const activeCount = this.countActive();
+    const freeSlots = Math.max(maxConcurrency - activeCount, 0);
+
+    const selected = items
+      .filter((item) => this.canAttempt(item.id))
+      .slice(0, freeSlots);
 
     for (const item of selected) {
-      await this.dispatch(item);
+      await this.claimItem(item);
     }
 
     this.logger.info("runtime.tick", {
-      eligibleCount: eligible.length,
-      claimedCount: this.claimed.size,
-      runningCount: this.running.size,
+      eligibleCount: items.length,
+      activeCount,
       selectedCount: selected.length,
-      slots,
+      freeSlots,
       maxConcurrency,
-      metrics: this.metrics,
     });
   }
 
-  getStateSnapshot(): RuntimeStateSnapshot {
-    return {
-      claimed: [...this.claimed],
-      running: [...this.running],
-      retryAttempts: Object.fromEntries(this.retryAttempts.entries()),
-      metrics: { ...this.metrics },
-    };
-  }
-
-  private reconcile(eligible: NormalizedWorkItem[]): void {
-    const eligibleIds = new Set(eligible.map((item) => item.id));
-
-    for (const itemId of [...this.claimed]) {
-      if (!eligibleIds.has(itemId)) {
-        this.transition(itemId, "reconcileLostEligibility");
-        this.metrics.reconciledDroppedClaims += 1;
-      }
+  markRunning(itemId: string): void {
+    const state = this.states.get(itemId);
+    if (!state) {
+      return;
     }
 
-    for (const itemId of [...this.running]) {
-      if (!eligibleIds.has(itemId)) {
-        this.transition(itemId, "reconcileLostEligibility");
-        this.metrics.reconciledDroppedRunning += 1;
-      }
-    }
+    state.status = "running";
+    state.nextAttemptAt = undefined;
+    this.states.set(itemId, state);
   }
 
-  private async dispatch(item: NormalizedWorkItem): Promise<void> {
-    this.transition(item.id, "claim");
+  async markDone(itemId: string): Promise<void> {
+    const state = this.states.get(itemId);
+    if (!state) {
+      return;
+    }
 
-    try {
-      await this.tracker.markInProgress(item.id);
-      this.transition(item.id, "dispatchSucceeded");
-      this.metrics.dispatched += 1;
-    } catch (error) {
-      this.transition(item.id, "dispatchFailed");
-      this.retryAttempts.set(item.id, (this.retryAttempts.get(item.id) ?? 0) + 1);
-      this.metrics.dispatchFailures += 1;
-      this.logger.error("runtime.dispatch_failed", {
-        itemId: item.id,
-        error: error instanceof Error ? error.message : String(error),
-        retryAttempts: this.retryAttempts.get(item.id),
+    await this.tracker.markDone(itemId);
+    this.states.delete(itemId);
+    this.logger.info("runtime.item.done", { itemId });
+  }
+
+  failActiveItem(itemId: string, reason: string): void {
+    const state = this.states.get(itemId);
+    if (!state) {
+      return;
+    }
+
+    this.scheduleRetry(state, reason);
+  }
+
+  // test/diagnostic helper
+  getItemState(itemId: string): Readonly<ItemRuntimeState> | undefined {
+    const state = this.states.get(itemId);
+    return state ? { ...state } : undefined;
+  }
+
+  private releaseIneligibleItems(eligibleById: Map<string, NormalizedWorkItem>): void {
+    for (const [itemId, state] of this.states.entries()) {
+      if (eligibleById.has(itemId)) {
+        continue;
+      }
+
+      this.states.delete(itemId);
+      this.logger.warn("runtime.item.stopped_ineligible", {
+        itemId,
+        previousStatus: state.status,
       });
     }
   }
 
-  private transition(itemId: string, event: RuntimeEvent): void {
-    const current = this.itemStates.get(itemId) ?? "idle";
+  private countActive(): number {
+    let count = 0;
+    for (const state of this.states.values()) {
+      if (state.status === "claimed" || state.status === "running") {
+        count += 1;
+      }
+    }
+    return count;
+  }
 
-    if (event === "claim") {
-      if (current !== "idle") {
+  private canAttempt(itemId: string): boolean {
+    const state = this.states.get(itemId);
+    if (!state) {
+      return true;
+    }
+
+    if (state.status === "claimed" || state.status === "running") {
+      return false;
+    }
+
+    if (state.attempts >= this.maxRetryAttempts) {
+      return false;
+    }
+
+    return this.now() >= (state.nextAttemptAt ?? 0);
+  }
+
+  private async claimItem(item: NormalizedWorkItem): Promise<void> {
+    const previous = this.states.get(item.id);
+    this.states.set(item.id, {
+      item,
+      status: "claimed",
+      attempts: previous?.attempts ?? 0,
+    });
+
+    try {
+      await this.tracker.markInProgress(item.id);
+      this.logger.info("runtime.item.claimed", {
+        itemId: item.id,
+        attempts: previous?.attempts ?? 0,
+      });
+    } catch (error) {
+      const state = this.states.get(item.id);
+      if (!state) {
         return;
       }
-      this.itemStates.set(itemId, "claimed");
-      this.claimed.add(itemId);
+      this.scheduleRetry(state, this.errorMessage(error));
+    }
+  }
+
+  private scheduleRetry(state: ItemRuntimeState, reason: string): void {
+    const attempts = state.attempts + 1;
+
+    if (attempts >= this.maxRetryAttempts) {
+      this.states.delete(state.item.id);
+      this.logger.error("runtime.item.retry_exhausted", {
+        itemId: state.item.id,
+        attempts,
+        reason,
+      });
       return;
     }
 
-    if (event === "dispatchSucceeded") {
-      if (current !== "claimed") {
-        return;
-      }
-      this.itemStates.set(itemId, "running");
-      this.claimed.delete(itemId);
-      this.running.add(itemId);
-      return;
-    }
+    const delayMs = this.backoffDelayMs(attempts);
+    const nextAttemptAt = this.now() + delayMs;
 
-    if (event === "dispatchFailed") {
-      if (current !== "claimed") {
-        return;
-      }
-      this.itemStates.set(itemId, "idle");
-      this.claimed.delete(itemId);
-      this.running.delete(itemId);
-      return;
-    }
+    this.states.set(state.item.id, {
+      ...state,
+      attempts,
+      status: "waiting_retry",
+      nextAttemptAt,
+      lastError: reason,
+    });
 
-    if (event === "reconcileLostEligibility") {
-      this.itemStates.set(itemId, "idle");
-      this.claimed.delete(itemId);
-      this.running.delete(itemId);
+    this.logger.warn("runtime.item.retry_scheduled", {
+      itemId: state.item.id,
+      attempts,
+      nextAttemptAt: new Date(nextAttemptAt).toISOString(),
+      delayMs,
+      reason,
+    });
+  }
+
+  private backoffDelayMs(attemptNumber: number): number {
+    return this.baseRetryDelayMs * 2 ** (attemptNumber - 1);
+  }
+
+  private errorMessage(error: unknown): string {
+    if (error instanceof Error) {
+      return error.message;
     }
+    return String(error);
   }
 }

@@ -1,141 +1,145 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { PollingRuntime } from "./runtime.js";
 import type { Logger } from "../logging/logger.js";
 import type { NormalizedWorkItem } from "../model/work-item.js";
-import { PollingRuntime } from "./runtime.js";
+import type { TrackerAdapter } from "../tracker/adapter.js";
 
-class TrackerStub {
-  public eligible: NormalizedWorkItem[] = [];
-  public markedInProgress: string[] = [];
-  public failIds = new Set<string>();
+class MemoryLogger implements Logger {
+  readonly entries: Array<{ level: "info" | "warn" | "error"; message: string; context?: Record<string, unknown> }> = [];
 
-  async listEligibleItems(): Promise<NormalizedWorkItem[]> {
-    return this.eligible;
+  info(message: string, context?: Record<string, unknown>): void {
+    this.entries.push({ level: "info", message, context });
   }
 
-  async markInProgress(itemId: string): Promise<void> {
-    if (this.failIds.has(itemId)) {
-      throw new Error(`failed:${itemId}`);
-    }
-    this.markedInProgress.push(itemId);
+  warn(message: string, context?: Record<string, unknown>): void {
+    this.entries.push({ level: "warn", message, context });
   }
 
-  async markDone(): Promise<void> {
-    return;
+  error(message: string, context?: Record<string, unknown>): void {
+    this.entries.push({ level: "error", message, context });
   }
 }
 
-const silentLogger: Logger = {
-  info: () => undefined,
-  warn: () => undefined,
-  error: () => undefined,
-};
+function item(id: string): NormalizedWorkItem {
+  return {
+    id,
+    title: `item-${id}`,
+    state: "todo",
+    labels: [],
+    assignees: [],
+    updatedAt: new Date().toISOString(),
+  };
+}
 
-const baseItem = (id: string): NormalizedWorkItem => ({
-  id,
-  title: id,
-  state: "todo",
-  labels: [],
-  assignees: [],
-  updatedAt: "2026-01-01T00:00:00.000Z",
-});
+test("schedules exponential backoff retries for transient claim failures", async () => {
+  let nowMs = 0;
+  const logger = new MemoryLogger();
 
-test("dispatch respects max concurrency", async () => {
-  const tracker = new TrackerStub();
-  tracker.eligible = [baseItem("1"), baseItem("2"), baseItem("3")];
+  const tracker: TrackerAdapter = {
+    async listEligibleItems() {
+      return [item("A")];
+    },
+    async markInProgress() {
+      throw new Error("temporary outage");
+    },
+    async markDone() {
+      // noop
+    },
+  };
 
   const runtime = new PollingRuntime(
     tracker,
-    {
-      name: "wf",
-      version: "1",
-      tracker: "github-projects",
-      pollIntervalMs: 5000,
-      maxConcurrency: 2,
-    },
-    silentLogger,
+    { name: "wf", version: "1", tracker: "github-projects", pollIntervalMs: 1000, maxConcurrency: 1 },
+    logger,
+    { maxRetryAttempts: 4, baseRetryDelayMs: 1000, now: () => nowMs },
   );
 
   await runtime.tick();
+  const first = runtime.getItemState("A");
+  assert.ok(first);
+  assert.equal(first.status, "waiting_retry");
+  assert.equal(first.attempts, 1);
+  assert.equal(first.nextAttemptAt, 1000);
 
-  assert.deepEqual(tracker.markedInProgress, ["1", "2"]);
-  const state = runtime.getStateSnapshot();
-  assert.deepEqual(state.running.sort(), ["1", "2"]);
-  assert.equal(state.metrics.dispatched, 2);
+  await runtime.tick();
+  const second = runtime.getItemState("A");
+  assert.ok(second);
+  assert.equal(second.attempts, 1, "should not retry before delay");
+
+  nowMs = 1000;
+  await runtime.tick();
+  const third = runtime.getItemState("A");
+  assert.ok(third);
+  assert.equal(third.attempts, 2);
+  assert.equal(third.nextAttemptAt, 3000, "second delay should double to 2000ms");
 });
 
-test("duplicate dispatch is prevented for already running item", async () => {
-  const tracker = new TrackerStub();
-  tracker.eligible = [baseItem("1")];
+test("stops active item when it becomes ineligible and releases state", async () => {
+  let eligible = [item("A")];
+  const logger = new MemoryLogger();
+
+  const tracker: TrackerAdapter = {
+    async listEligibleItems() {
+      return eligible;
+    },
+    async markInProgress() {
+      // success
+    },
+    async markDone() {
+      // noop
+    },
+  };
 
   const runtime = new PollingRuntime(
     tracker,
-    {
-      name: "wf",
-      version: "1",
-      tracker: "github-projects",
-      pollIntervalMs: 5000,
-      maxConcurrency: 1,
-    },
-    silentLogger,
+    { name: "wf", version: "1", tracker: "github-projects", pollIntervalMs: 1000, maxConcurrency: 1 },
+    logger,
   );
 
   await runtime.tick();
-  await runtime.tick();
+  runtime.markRunning("A");
+  assert.equal(runtime.getItemState("A")?.status, "running");
 
-  assert.deepEqual(tracker.markedInProgress, ["1"]);
-  assert.equal(runtime.getStateSnapshot().running.length, 1);
+  eligible = [];
+  await runtime.tick();
+  assert.equal(runtime.getItemState("A"), undefined);
+
+  const stopLog = logger.entries.find((entry) => entry.message === "runtime.item.stopped_ineligible");
+  assert.ok(stopLog, "must log stop reason for ineligible transition");
 });
 
-test("reconciliation frees capacity when running item is no longer eligible", async () => {
-  const tracker = new TrackerStub();
-  tracker.eligible = [baseItem("1")];
+test("releases state after retry exhaustion", async () => {
+  const logger = new MemoryLogger();
+  let nowMs = 10;
+
+  const tracker: TrackerAdapter = {
+    async listEligibleItems() {
+      return [item("A")];
+    },
+    async markInProgress() {
+      throw new Error("always failing");
+    },
+    async markDone() {
+      // noop
+    },
+  };
 
   const runtime = new PollingRuntime(
     tracker,
-    {
-      name: "wf",
-      version: "1",
-      tracker: "github-projects",
-      pollIntervalMs: 5000,
-      maxConcurrency: 1,
-    },
-    silentLogger,
+    { name: "wf", version: "1", tracker: "github-projects", pollIntervalMs: 1000, maxConcurrency: 1 },
+    logger,
+    { maxRetryAttempts: 2, baseRetryDelayMs: 1, now: () => nowMs },
   );
 
   await runtime.tick();
-  tracker.eligible = [baseItem("2")];
+  assert.ok(runtime.getItemState("A"), "first failure schedules retry");
+
+  nowMs = 11;
   await runtime.tick();
+  assert.equal(runtime.getItemState("A"), undefined, "second failure should exhaust and release");
 
-  assert.deepEqual(tracker.markedInProgress, ["1", "2"]);
-  const state = runtime.getStateSnapshot();
-  assert.deepEqual(state.running, ["2"]);
-  assert.equal(state.metrics.reconciledDroppedRunning, 1);
-});
-
-test("dispatch failures increment retry attempts and release claim", async () => {
-  const tracker = new TrackerStub();
-  tracker.eligible = [baseItem("fail")];
-  tracker.failIds.add("fail");
-
-  const runtime = new PollingRuntime(
-    tracker,
-    {
-      name: "wf",
-      version: "1",
-      tracker: "github-projects",
-      pollIntervalMs: 5000,
-      maxConcurrency: 1,
-    },
-    silentLogger,
-  );
-
-  await runtime.tick();
-
-  const state = runtime.getStateSnapshot();
-  assert.equal(state.retryAttempts.fail, 1);
-  assert.deepEqual(state.claimed, []);
-  assert.deepEqual(state.running, []);
-  assert.equal(state.metrics.dispatchFailures, 1);
+  const exhaustedLog = logger.entries.find((entry) => entry.message === "runtime.item.retry_exhausted");
+  assert.ok(exhaustedLog, "must log exhaustion reason");
 });
