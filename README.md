@@ -46,21 +46,18 @@ cd symphony-github-projects
 npm install
 ```
 
-### 2. Configure environment
+### 2. Set environment variables
+
+Following the [Symphony SPEC](https://github.com/openai/symphony/blob/main/SPEC.md), configuration
+values are resolved from runtime environment variables — not from `.env` files. Set them in your
+shell before starting the service:
 
 ```bash
-cp .env.example .env
+export GITHUB_TOKEN="ghp_xxxxxxxxxxxxxxxxxxxx"
 ```
 
-Fill in the required values:
-
-| Variable                | Description                                        |
-| ----------------------- | -------------------------------------------------- |
-| `GITHUB_TOKEN`          | Personal access token with `repo` and `project` scope |
-| `GITHUB_PROJECT_OWNER`  | GitHub user or organization that owns the project  |
-| `GITHUB_PROJECT_NUMBER` | Project number (visible in the project URL)        |
-| `WORKFLOW_PATH`         | Path to your `WORKFLOW.md` (default: `./WORKFLOW.md`) |
-| `LOG_LEVEL`             | Log verbosity: `info`, `warn`, `error`             |
+The `WORKFLOW.md` front matter references these variables with `$VAR_NAME` syntax (e.g.
+`tokenEnv: GITHUB_TOKEN`). The config resolver reads them from `process.env` at startup.
 
 ### 3. Create your WORKFLOW.md
 

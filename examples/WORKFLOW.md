@@ -2,28 +2,36 @@
 tracker:
   kind: github_projects
   github:
-    owner: kouka-t0yohei
+    owner: your-org
     type: org
-    projectNumber: 13
+    projectNumber: 1
     tokenEnv: GITHUB_TOKEN
 
 polling:
-  intervalMs: 300000
-  maxConcurrency: 1
+  intervalMs: 30000
+  maxConcurrency: 2
 
 workspace:
-  baseDir: /tmp/symphony-github-projects/workspaces
-
-agent:
-  command: codex
-  args: ["--json"]
+  baseDir: ~/symphony-workspaces
 
 hooks:
-  onStart: "echo orchestration started"
-  onSuccess: "echo orchestration succeeded"
-  onFailure: "echo orchestration failed"
+  after_create: |
+    git clone git@github.com:your-org/your-repo.git .
+    npm install
+  before_run: |
+    git fetch origin
+    git checkout main
+    git pull origin main
+
+agent:
+  command: codex app-server
+  maxTurns: 20
 ---
 
-# Symphony GitHub Projects Workflow
+You are working on GitHub Project item {{ issue.identifier }}.
 
-This file is consumed by the workflow loader (Issue #3).
+Title: {{ issue.title }}
+Description: {{ issue.description }}
+
+Follow the repository's coding standards. Write tests for new functionality.
+Create a pull request when the implementation is complete.
