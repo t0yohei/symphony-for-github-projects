@@ -5,6 +5,7 @@ export * from './logging/logger.js';
 export * from './model/work-item.js';
 export * from './orchestrator/runtime.js';
 export * from './tracker/adapter.js';
+export * from './agent/codex-app-server.js';
 export * from './prompt/template.js';
 
 export {
