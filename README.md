@@ -173,6 +173,14 @@ GitHub Projects extension namespace:
 - `extensions.github_projects.project_number`
 - `extensions.github_projects.token_env`
 - `extensions.github_projects.type`
+- `extensions.github_projects.active_states` (optional, default: `todo`, `in_progress`, `blocked`)
+- `extensions.github_projects.terminal_states` (optional, default: `done`)
+- `extensions.github_projects.status_options.in_progress` (optional label text, default `In Progress`)
+- `extensions.github_projects.status_options.done` (optional label text, default `Done`)
+- `extensions.github_projects.mark_done_on_completion` (optional, default: `false`)
+
+When `mark_done_on_completion: true`, a worker completion triggers `Project` state update to your configured `done` option.
+If this is left `false`, completion will schedule a short continuation retry by default, which is expected for multi-turn workflows but can look like a loop in simple one-turn setups.
 
 Compatibility mapping is built-in for existing keys (`polling.intervalMs`, `workspace.baseDir`,
 `agent.maxTurns`, `tracker.github.*`, and camelCase timeout/retry fields), so older WORKFLOW files

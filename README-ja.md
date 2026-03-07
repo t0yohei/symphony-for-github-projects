@@ -175,6 +175,14 @@ GitHub Projects 拡張:
 - `extensions.github_projects.project_number`
 - `extensions.github_projects.token_env`
 - `extensions.github_projects.type`
+- `extensions.github_projects.active_states`（任意、既定値: `todo`, `in_progress`, `blocked`）
+- `extensions.github_projects.terminal_states`（任意、既定値: `done`）
+- `extensions.github_projects.status_options.in_progress`（任意、既定値: `In Progress`）
+- `extensions.github_projects.status_options.done`（任意、既定値: `Done`）
+- `extensions.github_projects.mark_done_on_completion`（任意、既定値: `false`）
+
+`mark_done_on_completion: true` の場合、ワーカーが `completed` を返したら、対象アイテムを設定済み `done` の状態へ遷移させます。
+`false` のままだと、既定では短い間隔の continuation 再試行へ入り、1ターン完了の単純構成ではループに見えることがあります。
 
 古いキー（`polling.intervalMs` や `workspace.baseDir` など）との互換マッピングもあり、
 設定の自動移行をサポートします。

@@ -35,6 +35,19 @@ extensions:
     type: org
     project_number: 1
     token_env: GITHUB_TOKEN
+    # Optional completion behavior
+    # - Mark item as Done automatically when worker exits completed
+    # - Keep these in sync with your board field labels
+    mark_done_on_completion: true
+    status_options:
+      in_progress: In Progress
+      done: Done
+    active_states:
+      - todo
+      - in_progress
+      - blocked
+    terminal_states:
+      - done
 ---
 
 You are working on GitHub Project item {{ issue.identifier }}.
