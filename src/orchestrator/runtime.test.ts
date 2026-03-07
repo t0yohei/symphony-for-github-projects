@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import type { Logger } from '../logging/logger.js';
 import type { NormalizedWorkItem, WorkItemState } from '../model/work-item.js';
 import type { CodexTurnResult } from '../agent/codex-app-server.js';
+import type { WorkspaceManager } from '../workspace/manager.js';
 import { PollingRuntime, PreflightValidationError, validateRequiredWorkflowFields } from './runtime.js';
 
 class FakeLogger implements Logger {
@@ -952,6 +953,94 @@ describe('PollingRuntime state machine', () => {
         (log) => log.message === 'runtime.transition.metrics' && log.data?.session_id === 'sess-b',
       ),
     );
+  });
+});
+
+describe('PollingRuntime hot-reload behavior', () => {
+  it('re-applies active states during hot-reload', async () => {
+    class ActiveAwareTracker extends FakeTracker {
+      async listCandidateItems(options?: { pageSize?: number; activeStates?: string[] }): Promise<NormalizedWorkItem[]> {
+        if (!options?.activeStates) {
+          return this.items;
+        }
+        return this.items.filter((candidate) => options.activeStates!.includes(candidate.state));
+      }
+    }
+
+    const tracker = new ActiveAwareTracker();
+    tracker.items = [{ ...item('A', 101), state: 'blocked_custom' as WorkItemState }];
+    tracker.states.A = 'blocked_custom' as WorkItemState;
+
+    const runtime = new PollingRuntime(
+      tracker,
+      {
+        ...workflow,
+        extensions: {
+          github_projects: {
+            active_states: ['todo'],
+          },
+        },
+      },
+      new FakeLogger(),
+      baseRuntimeOptions,
+    );
+
+    await runtime.tick();
+    assert.equal(tracker.markInProgressCalls.length, 0, 'item should not dispatch with initial active states');
+
+    runtime.applyWorkflow({
+      ...workflow,
+      extensions: {
+        github_projects: {
+          active_states: ['blocked_custom'],
+        },
+      },
+    });
+
+    await runtime.tick();
+    assert.equal(tracker.markInProgressCalls.length, 1, 'item should dispatch after active_states changed');
+  });
+
+  it('rebuilds workspace manager when workspace root changes on hot-reload', async () => {
+    const tracker = new FakeTracker();
+    const fakeWorkspaceManager = {
+      prepareWorkspace: async () => ({ path: '/tmp/old-workspace' }),
+      beforeRun: async () => {},
+      afterRun: async () => {},
+      beforeRemove: async () => {},
+      resolveWorkspacePath: () => '/tmp/old-workspace',
+      toWorkspaceKey: () => '_old',
+      cleanupWorkspace: async () => {},
+      toWorkspaceKeyOrThrow: () => '_old',
+      workspaceRoot: '/tmp/first',
+    } as unknown as WorkspaceManager;
+
+
+    const runtime = new PollingRuntime(
+      tracker,
+      {
+        ...workflow,
+        workspace: { root: '/tmp/first', baseDir: '/tmp/first' },
+      },
+      new FakeLogger(),
+      {
+        ...baseRuntimeOptions,
+        workspaceManager: fakeWorkspaceManager,
+      },
+    );
+
+    const runtimeInternals = runtime as unknown as { workspaceManager: { [key: string]: unknown } };
+    assert.equal(runtimeInternals.workspaceManager, fakeWorkspaceManager);
+
+    runtime.applyWorkflow({
+      ...workflow,
+      workspace: { root: '/tmp/second', baseDir: '/tmp/second' },
+    });
+
+    assert.notEqual(runtimeInternals.workspaceManager, fakeWorkspaceManager);
+    const workspacePath = runtimeInternals.workspaceManager.resolveWorkspacePath('_old');
+    assert.equal(workspacePath.startsWith('/tmp/second/'), true);
+
   });
 });
 

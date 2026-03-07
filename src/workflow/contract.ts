@@ -1,5 +1,6 @@
 import { loadWorkflowFile, type WorkflowDocument } from './loader.js';
 
+
 export type WorkflowValidationErrorCode =
   | 'tracker.kind.required'
   | 'tracker.kind.unsupported'
@@ -147,6 +148,7 @@ export function buildContract(doc: WorkflowDocument): LoadedWorkflowContract {
   const workspaceRoot =
     coerceString(readPath(config, ['workspace', 'root'])) ??
     coerceString(readPath(config, ['workspace', 'baseDir']))!;
+  const expandedWorkspaceRoot = expandPathWithEnvironment(workspaceRoot);
 
   const hooks = (readPath(config, ['hooks']) as Record<string, unknown> | undefined) ?? {};
   const extensions =
@@ -181,8 +183,8 @@ export function buildContract(doc: WorkflowDocument): LoadedWorkflowContract {
       },
     },
     workspace: {
-      root: workspaceRoot,
-      baseDir: workspaceRoot,
+      root: expandedWorkspaceRoot,
+      baseDir: expandedWorkspaceRoot,
     },
     agent: {
       command: coerceString(readPath(config, ['agent', 'command']))!,
@@ -375,6 +377,24 @@ function readPath(input: Record<string, unknown>, path: string[]): unknown {
 
 function coerceString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+
+
+function expandPathWithEnvironment(raw: string): string {
+  let expanded = raw;
+  if (expanded.startsWith('~')) {
+    const home = process.env.HOME;
+    if (home) {
+      expanded = `${home}${expanded.slice(1)}`;
+    }
+  }
+
+  return expanded.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_match, braced, plain) => {
+    const name = braced ?? plain;
+    const value = process.env[name];
+    return value ?? _match;
+  });
 }
 
 function coerceNumber(value: unknown): number | undefined {

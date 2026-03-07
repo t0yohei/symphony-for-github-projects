@@ -131,6 +131,41 @@ test('buildContract surfaces validation errors clearly', () => {
   );
 });
 
+
+
+test('buildContract expands workspace path with HOME and env vars', () => {
+  process.env.WORKFLOW_TEST_ROOT = '/var/tmp/symphony-custom';
+  const doc: WorkflowDocument = {
+    config: {
+      tracker: {
+        kind: 'github_projects',
+        github: {
+          owner: 'kouka-t0yohei',
+          projectNumber: 123,
+          tokenEnv: 'GITHUB_TOKEN',
+        },
+      },
+      polling: {
+        intervalMs: 5000,
+        maxConcurrency: 1,
+      },
+      workspace: {
+        root: '$WORKFLOW_TEST_ROOT/workspaces',
+      },
+      agent: {
+        command: 'codex',
+      },
+    },
+    prompt_template: 'Run',
+  };
+
+  const contract = buildContract(doc);
+  assert.equal(contract.workspace.root, '/var/tmp/symphony-custom/workspaces');
+
+  delete process.env.WORKFLOW_TEST_ROOT;
+});
+
+
 test('FileWorkflowLoader reads file and returns contract with prompt template', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'workflow-contract-loader-'));
   const filePath = join(dir, 'WORKFLOW.md');

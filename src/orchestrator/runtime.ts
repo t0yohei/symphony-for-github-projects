@@ -6,6 +6,7 @@ import type { TrackerAdapter } from '../tracker/adapter.js';
 import { renderPromptTemplate } from '../prompt/template.js';
 import type { WorkflowContract } from '../workflow/contract.js';
 import { WorkspaceManager } from '../workspace/manager.js';
+import { HookRunner } from '../workspace/hooks.js';
 export interface OrchestratorRuntime {
   tick(): Promise<void>;
 }
@@ -180,7 +181,7 @@ export class PollingRuntime implements OrchestratorRuntime {
   private failureRetryMaxDelayMs: number;
   private readonly env: Record<string, string | undefined>;
   private readonly commandExists: (command: string) => boolean;
-  private readonly workspaceManager: WorkspaceManager;
+  private workspaceManager: WorkspaceManager;
   private readonly workerFactory: (context: {
     item: NormalizedWorkItem;
     workspacePath: string;
@@ -222,17 +223,33 @@ export class PollingRuntime implements OrchestratorRuntime {
     this.reconfigureRetryPolicy(workflow);
     this.env = options.env ?? process.env;
     this.commandExists = options.commandExists ?? defaultCommandExists;
-    const workspaceRoot = this.workflow.workspace?.baseDir ?? this.workflow.workspace?.root;
+    this.workspaceManager = options.workspaceManager ?? this.buildWorkspaceManagerFromWorkflow(this.workflow);
+    this.workerFactory = options.workerFactory ?? ((context) => Promise.resolve(this.buildDefaultWorker(context)));
+  }
+
+
+  private buildWorkspaceManagerFromWorkflow(workflow: WorkflowContract): WorkspaceManager {
+    const workspaceRoot = workflow.workspace?.baseDir ?? workflow.workspace?.root;
     if (!workspaceRoot) {
       throw new Error('workspace.root is required');
     }
 
-    this.workspaceManager =
-      options.workspaceManager ??
-      new WorkspaceManager({
-        workspaceRoot,
-      });
-    this.workerFactory = options.workerFactory ?? ((context) => Promise.resolve(this.buildDefaultWorker(context)));
+    const hooks = workflow.hooks;
+    return new WorkspaceManager({
+      workspaceRoot,
+      hooks: hooks
+        ? new HookRunner({
+            hooks: {
+              after_create: hooks.after_create ?? hooks.onStart,
+              before_run: hooks.before_run,
+              after_run: hooks.after_run ?? hooks.onSuccess,
+              before_remove: hooks.before_remove,
+            },
+            timeoutMs: workflow.agent.timeouts?.hooksTimeoutMs,
+            logger: this.logger,
+          })
+        : undefined,
+    });
   }
 
   private reconfigureRetryPolicy(workflow: WorkflowContract): void {
@@ -265,7 +282,7 @@ export class PollingRuntime implements OrchestratorRuntime {
       return;
     }
 
-    const candidates = await this.tracker.listEligibleItems();
+    const candidates = await this.tracker.listCandidateItems({ activeStates: [...this.resolveActiveStates()] as WorkItemState[] });
     const sorted = sortCandidates(candidates);
     const dispatchable = sorted.filter((item) => this.isDispatchable(item.id));
     const todoBlockedByNonTerminal = await this.findTodoItemsBlockedByNonTerminal(dispatchable);
@@ -475,13 +492,40 @@ export class PollingRuntime implements OrchestratorRuntime {
   }
 
   applyWorkflow(nextWorkflow: WorkflowContract): void {
+    const prevWorkflow = this.workflow;
+    const prevWorkspaceRoot = this.workflow.workspace?.baseDir ?? this.workflow.workspace?.root;
+    const nextWorkspaceRoot = nextWorkflow.workspace?.baseDir ?? nextWorkflow.workspace?.root;
+    const prevHooks = this.workflow.hooks;
+    const nextHooks = nextWorkflow.hooks;
+
     this.workflow = nextWorkflow;
     this.reconfigureRetryPolicy(nextWorkflow);
+
+    const hooksChanged = JSON.stringify(prevHooks ?? {}) !== JSON.stringify(nextHooks ?? {});
+    if (prevWorkspaceRoot !== nextWorkspaceRoot || hooksChanged) {
+      this.workspaceManager = this.buildWorkspaceManagerFromWorkflow(nextWorkflow);
+    }
+
+    if (
+      prevWorkflow.tracker.github.owner !== nextWorkflow.tracker.github.owner ||
+      prevWorkflow.tracker.github.projectNumber !== nextWorkflow.tracker.github.projectNumber ||
+      prevWorkflow.tracker.github.tokenEnv !== nextWorkflow.tracker.github.tokenEnv
+    ) {
+      this.logger.warn('runtime.config.reloaded_but_not_applied', {
+        reason: 'tracker_config_changed',
+        previous_owner: prevWorkflow.tracker.github.owner,
+        next_owner: nextWorkflow.tracker.github.owner,
+        previous_project_number: prevWorkflow.tracker.github.projectNumber,
+        next_project_number: nextWorkflow.tracker.github.projectNumber,
+      });
+    }
+
     this.logger.info('runtime.config.applied', {
       maxConcurrency: nextWorkflow.polling.maxConcurrency ?? 1,
       pollIntervalMs: nextWorkflow.polling.intervalMs,
       continuationRetryDelayMs: this.continuationRetryDelayMs,
       failureRetryMaxDelayMs: this.failureRetryMaxDelayMs,
+      workspaceRoot: nextWorkspaceRoot,
     });
   }
 
@@ -694,7 +738,7 @@ export class PollingRuntime implements OrchestratorRuntime {
   }
 
   private async findEligibleItem(itemId: string): Promise<NormalizedWorkItem | undefined> {
-    const candidates = await this.tracker.listEligibleItems();
+    const candidates = await this.tracker.listCandidateItems({ activeStates: [...this.resolveActiveStates()] as WorkItemState[] });
     return candidates.find((item) => item.id === itemId);
   }
 

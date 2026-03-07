@@ -141,26 +141,23 @@ export async function bootstrapFromWorkflow(
   }
 
   if (!deps.skipStartupCleanup) {
-    await performStartupTerminalCleanup(tracker, workspaceRoot, logger);
+    await performStartupTerminalCleanup(tracker, workspaceRoot, logger, resolveTerminalStates(workflow));
   }
 
   const workspaceManager = new WorkspaceManager({
     workspaceRoot,
-    hooks:
-      workflow.hooks ||
-      undefined
-        ? new HookRunner({
-            hooks: {
-              after_create:
-                workflow.hooks?.after_create ?? workflow.hooks?.onStart,
-              before_run: workflow.hooks?.before_run,
-              after_run: workflow.hooks?.after_run ?? workflow.hooks?.onSuccess,
-              before_remove: workflow.hooks?.before_remove,
-            },
-            timeoutMs: workflow.agent.timeouts?.hooksTimeoutMs,
-            logger,
-          })
-        : undefined,
+    hooks: workflow.hooks
+      ? new HookRunner({
+          hooks: {
+            after_create: workflow.hooks?.after_create ?? workflow.hooks?.onStart,
+            before_run: workflow.hooks?.before_run,
+            after_run: workflow.hooks?.after_run ?? workflow.hooks?.onSuccess,
+            before_remove: workflow.hooks?.before_remove,
+          },
+          timeoutMs: workflow.agent.timeouts?.hooksTimeoutMs,
+          logger,
+        })
+      : undefined,
   });
 
   const runtime = new PollingRuntime(tracker, workflow, logger, {
@@ -223,6 +220,21 @@ function createTrackerFromWorkflow(workflow: LoadedWorkflowContract): TrackerAda
     writer,
     activeStates: resolveActiveStates(workflow),
   });
+}
+
+
+function resolveTerminalStates(workflow: LoadedWorkflowContract): string[] {
+  const raw = (workflow.extensions?.github_projects as Record<string, unknown> | undefined)?.terminal_states;
+  if (!Array.isArray(raw)) {
+    return ['done'];
+  }
+
+  const values = raw
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+
+  return values.length > 0 ? values : ['done'];
 }
 
 function resolveStatusOptions(workflow: LoadedWorkflowContract): Partial<StatusOptionMapping> | undefined {

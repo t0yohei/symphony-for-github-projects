@@ -70,6 +70,58 @@ test('bootstrapFromWorkflow wires runtime and emits bootstrap log', async () => 
   assert.equal(bootstrapLog?.context?.maxConcurrency, 2);
 });
 
+
+
+test('bootstrapFromWorkflow uses terminal_states extension for startup cleanup', async () => {
+  class TerminalStateTracker extends StubTracker {
+    public requestedStates: string[] = [];
+    override async listItemsByStates(states: WorkItemState[]): Promise<NormalizedWorkItem[]> {
+      this.requestedStates = states;
+      return [];
+    }
+  }
+
+  const logger = new CapturingLogger();
+  const terminalTracker = new TerminalStateTracker();
+
+  class TerminalLoader implements WorkflowLoader {
+    async load(_path: string): Promise<LoadedWorkflowContract> {
+      return {
+        tracker: {
+          kind: 'github_projects',
+          github: {
+            owner: 'kouka-t0yohei',
+            projectNumber: 1,
+            tokenEnv: 'BOOTSTRAP_TEST_TOKEN',
+          },
+        },
+        runtime: { pollIntervalMs: 60_000, maxConcurrency: 2 },
+        polling: { intervalMs: 60_000, maxConcurrency: 2 },
+        workspace: { root: './tmp/workspaces', baseDir: './tmp/workspaces' },
+        agent: { command: 'codex' },
+        extensions: {
+          github_projects: {
+            terminal_states: ['DONE', 'done'],
+          },
+        },
+        prompt_template: 'Run the workflow',
+      };
+    }
+  }
+
+  process.env.BOOTSTRAP_TEST_TOKEN = 'test-token';
+
+  await bootstrapFromWorkflow('./WORKFLOW.md', {
+    workflowLoader: new TerminalLoader(),
+    trackerAdapter: terminalTracker,
+    logger,
+    skipStartupCleanup: false,
+  });
+
+  assert.deepEqual(terminalTracker.requestedStates, ['done']);
+});
+
+
 test('bootstrapFromWorkflow fails fast when tracker auth env var is missing', async () => {
   delete process.env.BOOTSTRAP_TEST_TOKEN;
 
