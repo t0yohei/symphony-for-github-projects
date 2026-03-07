@@ -107,6 +107,7 @@ function formatThreadTitle(identifier?: string, title?: string): string | undefi
 }
 
 export class CodexAppServerClient {
+  private activeProcess: ChildProcessLike | undefined;
   private readonly state: CodexSessionState = {
     sessionId: undefined,
     threadId: undefined,
@@ -161,6 +162,7 @@ export class CodexAppServerClient {
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    this.activeProcess = child;
 
     let lineBuffer = '';
     let latestEventAt = Date.now();
@@ -244,6 +246,12 @@ export class CodexAppServerClient {
       const text = chunk.toString().trim();
       if (text !== '') {
         errorMessage = text;
+      }
+    });
+
+    child.on('exit', () => {
+      if (this.activeProcess === child) {
+        this.activeProcess = undefined;
       }
     });
 
@@ -447,6 +455,16 @@ export class CodexAppServerClient {
     if (rateLimited) {
       this.state.latestRateLimitAt = Date.now();
     }
+  }
+
+  cancelCurrentRun(): boolean {
+    const processRef = this.activeProcess;
+    if (!processRef) {
+      return false;
+    }
+
+    processRef.kill('SIGTERM');
+    return true;
   }
 
   private snapshotState(): CodexSessionState {

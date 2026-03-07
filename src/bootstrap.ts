@@ -15,6 +15,7 @@ import {
   type WorkflowLoader,
 } from './workflow/contract.js';
 import { WorkspaceManager } from './workspace/manager.js';
+import { HookRunner } from './workspace/hooks.js';
 
 export interface BootstrapDependencies {
   workflowLoader?: WorkflowLoader;
@@ -135,11 +136,36 @@ export async function bootstrapFromWorkflow(
   // Uses the workspace root from workflow config; skipped when root is unset or
   // explicitly opted out via deps.skipStartupCleanup.
   const workspaceRoot = workflow.workspace.root ?? workflow.workspace.baseDir;
-  if (!deps.skipStartupCleanup && workspaceRoot) {
+  if (!workspaceRoot) {
+    throw new BootstrapConfigurationError('workflow.workspace.root is required');
+  }
+
+  if (!deps.skipStartupCleanup) {
     await performStartupTerminalCleanup(tracker, workspaceRoot, logger);
   }
 
-  const runtime = new PollingRuntime(tracker, workflow, logger);
+  const workspaceManager = new WorkspaceManager({
+    workspaceRoot,
+    hooks:
+      workflow.hooks ||
+      undefined
+        ? new HookRunner({
+            hooks: {
+              after_create:
+                workflow.hooks?.after_create ?? workflow.hooks?.onStart,
+              before_run: workflow.hooks?.before_run,
+              after_run: workflow.hooks?.after_run ?? workflow.hooks?.onSuccess,
+              before_remove: workflow.hooks?.before_remove,
+            },
+            timeoutMs: workflow.agent.timeouts?.hooksTimeoutMs,
+            logger,
+          })
+        : undefined,
+  });
+
+  const runtime = new PollingRuntime(tracker, workflow, logger, {
+    workspaceManager,
+  });
 
   logger.info('bootstrap.ready', {
     workflowPath,

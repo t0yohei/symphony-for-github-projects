@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import type { Logger } from '../logging/logger.js';
 import type { NormalizedWorkItem, WorkItemState } from '../model/work-item.js';
+import type { CodexTurnResult } from '../agent/codex-app-server.js';
 import { PollingRuntime, PreflightValidationError, validateRequiredWorkflowFields } from './runtime.js';
 
 class FakeLogger implements Logger {
@@ -92,9 +93,17 @@ const workflow = {
   agent: { command: 'codex' },
 };
 
+const neverFinishWorker = {
+  run: async (): Promise<CodexTurnResult> => {
+    return new Promise<CodexTurnResult>(() => {});
+  },
+  cancel: () => {},
+};
+
 const baseRuntimeOptions = {
   env: { GITHUB_TOKEN: 'token' },
   commandExists: () => true,
+  workerFactory: () => neverFinishWorker,
 };
 
 describe('PollingRuntime state machine', () => {
