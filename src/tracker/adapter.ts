@@ -23,6 +23,7 @@ export interface TrackerWriter {
 export interface GitHubProjectsAdapterOptions {
   owner: string;
   projectNumber: number;
+  ownerType?: 'org' | 'user';
   client: GitHubProjectsClient;
   writer?: TrackerWriter;
   pageSize?: number;
@@ -43,6 +44,7 @@ const DEFAULT_BLOCKER_FIELD_NAMES = [
 export class GitHubProjectsAdapter implements TrackerAdapter {
   private readonly owner: string;
   private readonly projectNumber: number;
+  private readonly ownerType?: 'org' | 'user';
   private readonly client: GitHubProjectsClient;
   private readonly writer?: TrackerWriter;
   private readonly defaultPageSize: number;
@@ -52,6 +54,7 @@ export class GitHubProjectsAdapter implements TrackerAdapter {
   constructor(options: GitHubProjectsAdapterOptions) {
     this.owner = options.owner;
     this.projectNumber = options.projectNumber;
+    this.ownerType = options.ownerType;
     this.client = options.client;
     this.writer = options.writer;
     this.defaultPageSize = options.pageSize ?? 50;
@@ -90,6 +93,7 @@ export class GitHubProjectsAdapter implements TrackerAdapter {
       const page = await this.client.fetchProjectItemsPage({
         owner: this.owner,
         projectNumber: this.projectNumber,
+        ownerType: this.ownerType,
         first: pageSize,
         after,
       });

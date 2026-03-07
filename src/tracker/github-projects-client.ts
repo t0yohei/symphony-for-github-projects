@@ -88,6 +88,7 @@ export interface GitHubProjectsClient {
   fetchProjectItemsPage(params: {
     owner: string;
     projectNumber: number;
+    ownerType?: 'org' | 'user';
     first: number;
     after?: string;
   }): Promise<ProjectItemsPage>;
@@ -123,12 +124,13 @@ export class GitHubProjectsGraphQLClient implements GitHubProjectsClient {
   async fetchProjectItemsPage(params: {
     owner: string;
     projectNumber: number;
+    ownerType?: 'org' | 'user';
     first: number;
     after?: string;
   }): Promise<ProjectItemsPage> {
     const query = `
-      query ProjectItems($owner: String!, $number: Int!, $first: Int!, $after: String) {
-        user(login: $owner) {
+      query ProjectItems($owner: String!, $number: Int!, $first: Int!, $after: String, $includeUser: Boolean!, $includeOrg: Boolean!) {
+        user(login: $owner) @include(if: $includeUser) {
           projectV2(number: $number) {
             items(first: $first, after: $after) {
               pageInfo { hasNextPage endCursor }
@@ -151,15 +153,45 @@ export class GitHubProjectsGraphQLClient implements GitHubProjectsClient {
                     __typename
                     ... on ProjectV2ItemFieldSingleSelectValue {
                       name
-                      field { name }
+                      field {
+                        ... on ProjectV2Field {
+                          name
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          name
+                        }
+                        ... on ProjectV2IterationField {
+                          name
+                        }
+                      }
                     }
                     ... on ProjectV2ItemFieldTextValue {
                       text
-                      field { name }
+                      field {
+                        ... on ProjectV2Field {
+                          name
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          name
+                        }
+                        ... on ProjectV2IterationField {
+                          name
+                        }
+                      }
                     }
                     ... on ProjectV2ItemFieldNumberValue {
                       number
-                      field { name }
+                      field {
+                        ... on ProjectV2Field {
+                          name
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          name
+                        }
+                        ... on ProjectV2IterationField {
+                          name
+                        }
+                      }
                     }
                   }
                 }
@@ -167,7 +199,7 @@ export class GitHubProjectsGraphQLClient implements GitHubProjectsClient {
             }
           }
         }
-        organization(login: $owner) {
+        organization(login: $owner) @include(if: $includeOrg) {
           projectV2(number: $number) {
             items(first: $first, after: $after) {
               pageInfo { hasNextPage endCursor }
@@ -190,15 +222,45 @@ export class GitHubProjectsGraphQLClient implements GitHubProjectsClient {
                     __typename
                     ... on ProjectV2ItemFieldSingleSelectValue {
                       name
-                      field { name }
+                      field {
+                        ... on ProjectV2Field {
+                          name
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          name
+                        }
+                        ... on ProjectV2IterationField {
+                          name
+                        }
+                      }
                     }
                     ... on ProjectV2ItemFieldTextValue {
                       text
-                      field { name }
+                      field {
+                        ... on ProjectV2Field {
+                          name
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          name
+                        }
+                        ... on ProjectV2IterationField {
+                          name
+                        }
+                      }
                     }
                     ... on ProjectV2ItemFieldNumberValue {
                       number
-                      field { name }
+                      field {
+                        ... on ProjectV2Field {
+                          name
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          name
+                        }
+                        ... on ProjectV2IterationField {
+                          name
+                        }
+                      }
                     }
                   }
                 }
@@ -209,11 +271,17 @@ export class GitHubProjectsGraphQLClient implements GitHubProjectsClient {
       }
     `;
 
+    const ownerType = params.ownerType;
+    const includeUser = ownerType === 'user' || ownerType === undefined;
+    const includeOrg = ownerType === 'org' || ownerType === undefined;
+
     const data = await this.safeQuery<ProjectItemsPageQuery>(query, {
       owner: params.owner,
       number: params.projectNumber,
       first: params.first,
       after: params.after ?? null,
+      includeUser,
+      includeOrg,
     });
 
     const connection = data.user?.projectV2?.items ?? data.organization?.projectV2?.items;
@@ -253,15 +321,45 @@ export class GitHubProjectsGraphQLClient implements GitHubProjectsClient {
                 __typename
                 ... on ProjectV2ItemFieldSingleSelectValue {
                   name
-                  field { name }
+                  field {
+                        ... on ProjectV2Field {
+                          name
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          name
+                        }
+                        ... on ProjectV2IterationField {
+                          name
+                        }
+                      }
                 }
                 ... on ProjectV2ItemFieldTextValue {
                   text
-                  field { name }
+                  field {
+                        ... on ProjectV2Field {
+                          name
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          name
+                        }
+                        ... on ProjectV2IterationField {
+                          name
+                        }
+                      }
                 }
                 ... on ProjectV2ItemFieldNumberValue {
                   number
-                  field { name }
+                  field {
+                        ... on ProjectV2Field {
+                          name
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          name
+                        }
+                        ... on ProjectV2IterationField {
+                          name
+                        }
+                      }
                 }
               }
             }

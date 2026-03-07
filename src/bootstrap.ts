@@ -183,7 +183,7 @@ export async function bootstrapFromWorkflow(
 }
 
 function createTrackerFromWorkflow(workflow: LoadedWorkflowContract): TrackerAdapter {
-  const { owner, projectNumber, tokenEnv } = workflow.tracker.github;
+  const { owner, projectNumber, tokenEnv, type } = workflow.tracker.github;
   const token = process.env[tokenEnv]?.trim();
 
   if (!token) {
@@ -200,8 +200,8 @@ function createTrackerFromWorkflow(workflow: LoadedWorkflowContract): TrackerAda
     projectId: `owner:${owner}#${projectNumber}`,
     graphqlClient: {
       query: async <T>(queryString: string, variables?: Record<string, unknown>) => {
-        if (queryString.includes('query($projectId: ID!)') && variables?.projectId === `owner:${owner}#${projectNumber}`) {
-          const resolvedProjectId = await resolveProjectId(graphQLClient, owner, projectNumber);
+        if (queryString.includes('$projectId: ID!') && variables?.projectId === `owner:${owner}#${projectNumber}`) {
+          const resolvedProjectId = await resolveProjectId(graphQLClient, owner, projectNumber, type);
           return graphQLClient.query<T>(queryString, {
             ...(variables ?? {}),
             projectId: resolvedProjectId,
@@ -216,6 +216,7 @@ function createTrackerFromWorkflow(workflow: LoadedWorkflowContract): TrackerAda
   return new GitHubProjectsAdapter({
     owner,
     projectNumber,
+    ownerType: type,
     client: projectsClient,
     writer,
     activeStates: resolveActiveStates(workflow),
@@ -273,22 +274,30 @@ function resolveActiveStates(workflow: LoadedWorkflowContract): string[] | undef
 
 const projectIdCache = new Map<string, string>();
 
-async function resolveProjectId(client: GraphQLClient, owner: string, projectNumber: number): Promise<string> {
+async function resolveProjectId(
+  client: GraphQLClient,
+  owner: string,
+  projectNumber: number,
+  ownerType?: 'org' | 'user',
+): Promise<string> {
   const key = `${owner}#${projectNumber}`;
   const cached = projectIdCache.get(key);
   if (cached) {
     return cached;
   }
 
+  const includeUser = ownerType === 'user' || ownerType === undefined;
+  const includeOrg = ownerType === 'org' || ownerType === undefined;
+
   const data = await client.query<{
     user?: { projectV2?: { id?: string | null } | null } | null;
     organization?: { projectV2?: { id?: string | null } | null } | null;
   }>(
-    `query($owner: String!, $number: Int!) {
-      user(login: $owner) { projectV2(number: $number) { id } }
-      organization(login: $owner) { projectV2(number: $number) { id } }
+    `query($owner: String!, $number: Int!, $includeUser: Boolean!, $includeOrg: Boolean!) {
+      user(login: $owner) @include(if: $includeUser) { projectV2(number: $number) { id } }
+      organization(login: $owner) @include(if: $includeOrg) { projectV2(number: $number) { id } }
     }`,
-    { owner, number: projectNumber },
+    { owner, number: projectNumber, includeUser, includeOrg },
   );
 
   const projectId = data.user?.projectV2?.id ?? data.organization?.projectV2?.id;
