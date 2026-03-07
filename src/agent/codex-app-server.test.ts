@@ -83,6 +83,116 @@ test('spawns codex app-server with deterministic initialize -> thread/turn order
   assert.equal(writes[2].params.message, 'hello codex');
 });
 
+test('initialize sends cwd in params for protocol compatibility', async () => {
+  const fake = new FakeChildProcess();
+
+  const client = new CodexAppServerClient({
+    cwd: '/home/user/project',
+    readTimeoutMs: 10,
+    stallTimeoutMs: 500,
+    spawn: () => {
+      queueMicrotask(() => {
+        fake.emitStdoutJson({ method: 'initialized' });
+        fake.emitStdoutJson({
+          params: { turn: { completed: true, active_issue: false } },
+        });
+      });
+      return fake;
+    },
+  });
+
+  await client.run({ renderedPrompt: 'test cwd' });
+
+  const writes = fake.writes.map((w) => JSON.parse(w.trim()));
+  const initMsg = writes.find((w) => w.method === 'initialize');
+  assert.ok(initMsg, 'initialize message must be sent');
+  assert.equal(initMsg.params.cwd, '/home/user/project');
+});
+
+test('thread.start includes formatted title and cwd when identifier and title are provided', async () => {
+  const fake = new FakeChildProcess();
+
+  const client = new CodexAppServerClient({
+    cwd: '/tmp/workspace',
+    readTimeoutMs: 10,
+    stallTimeoutMs: 500,
+    spawn: () => {
+      queueMicrotask(() => {
+        fake.emitStdoutJson({ method: 'initialized' });
+        fake.emitStdoutJson({
+          params: { turn: { completed: true, active_issue: false } },
+        });
+      });
+      return fake;
+    },
+  });
+
+  await client.run({
+    renderedPrompt: 'implement the feature',
+    identifier: 'ISSUE-71',
+    title: 'make Codex app-server handshake protocol-compatible',
+  });
+
+  const writes = fake.writes.map((w) => JSON.parse(w.trim()));
+  const threadStart = writes.find((w) => w.method === 'thread.start');
+  assert.ok(threadStart, 'thread.start must be sent');
+  assert.equal(threadStart.params.title, 'ISSUE-71: make Codex app-server handshake protocol-compatible');
+  assert.equal(threadStart.params.cwd, '/tmp/workspace');
+  assert.equal(threadStart.params.prompt, 'implement the feature');
+});
+
+test('thread.start includes cwd without title when identifier/title are omitted', async () => {
+  const fake = new FakeChildProcess();
+
+  const client = new CodexAppServerClient({
+    cwd: '/tmp/workspace',
+    readTimeoutMs: 10,
+    stallTimeoutMs: 500,
+    spawn: () => {
+      queueMicrotask(() => {
+        fake.emitStdoutJson({ method: 'initialized' });
+        fake.emitStdoutJson({
+          params: { turn: { completed: true, active_issue: false } },
+        });
+      });
+      return fake;
+    },
+  });
+
+  await client.run({ renderedPrompt: 'no title run' });
+
+  const writes = fake.writes.map((w) => JSON.parse(w.trim()));
+  const threadStart = writes.find((w) => w.method === 'thread.start');
+  assert.ok(threadStart, 'thread.start must be sent');
+  assert.equal(threadStart.params.cwd, '/tmp/workspace');
+  assert.equal(threadStart.params.title, undefined);
+});
+
+test('detects cancelled turn and returns cancelled status', async () => {
+  const fake = new FakeChildProcess();
+
+  const client = new CodexAppServerClient({
+    cwd: '/tmp/workspace',
+    readTimeoutMs: 10,
+    stallTimeoutMs: 500,
+    spawn: () => {
+      queueMicrotask(() => {
+        fake.emitStdoutJson({ method: 'initialized' });
+        fake.emitStdoutJson({
+          params: { turn: { cancelled: true } },
+        });
+      });
+      return fake;
+    },
+  });
+
+  const result = await client.run({ renderedPrompt: 'will be cancelled' });
+
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.activeIssue, false);
+  assert.equal(fake.killed, true);
+});
+
 test('continues multi-turn on same thread and uses continuation guidance', async () => {
   const fake = new FakeChildProcess();
   let initializedSent = false;

@@ -18,7 +18,7 @@ export interface CodexSessionState {
 }
 
 export interface CodexTurnResult {
-  status: 'completed' | 'error' | 'rate_limited' | 'timeout' | 'stalled';
+  status: 'completed' | 'error' | 'rate_limited' | 'timeout' | 'stalled' | 'cancelled';
   activeIssue: boolean;
   state: CodexSessionState;
   errorMessage?: string;
@@ -27,6 +27,10 @@ export interface CodexTurnResult {
 export interface RunTurnParams {
   renderedPrompt: string;
   continuationGuidance?: string;
+  /** Short identifier for the work item (e.g. "ISSUE-71"). Combined with title as "<identifier>: <title>". */
+  identifier?: string;
+  /** Human-readable title for the thread. Combined with identifier as "<identifier>: <title>". */
+  title?: string;
 }
 
 export interface CodexAppServerClientOptions {
@@ -69,6 +73,12 @@ const DEFAULT_MAX_TURNS = 3;
 const DEFAULT_TURN_TIMEOUT_MS = 120_000;
 const DEFAULT_READ_TIMEOUT_MS = 10_000;
 const DEFAULT_STALL_TIMEOUT_MS = 30_000;
+
+/** Format the thread title as "<identifier>: <title>" when both are provided. */
+function formatThreadTitle(identifier?: string, title?: string): string | undefined {
+  const parts = [identifier, title].filter((p): p is string => typeof p === 'string' && p.trim() !== '');
+  return parts.length > 0 ? parts.join(': ') : undefined;
+}
 
 export class CodexAppServerClient {
   private readonly state: CodexSessionState = {
@@ -122,6 +132,7 @@ export class CodexAppServerClient {
     let lineBuffer = '';
     let latestEventAt = Date.now();
     let completed = false;
+    let cancelled = false;
     let activeIssue = false;
     let errorMessage: string | undefined;
     let initialized = false;
@@ -157,6 +168,17 @@ export class CodexAppServerClient {
               completed = true;
               this.state.turnsCompleted += 1;
             }
+
+            const cancelledFlag = readBoolean(event, [
+              'params.turn.cancelled',
+              'params.cancelled',
+              'turn.cancelled',
+              'cancelled',
+            ]);
+            if (cancelledFlag) {
+              cancelled = true;
+            }
+
             const activeIssueFlag = readBoolean(event, [
               'params.turn.active_issue',
               'params.active_issue',
@@ -196,7 +218,10 @@ export class CodexAppServerClient {
       throw new Error('codex app-server stdin is not available');
     }
 
-    child.stdin.write(`${JSON.stringify({ method: 'initialize', params: {} })}\n`);
+    // Step 1: Send initialize with workspace cwd to establish the protocol session.
+    child.stdin.write(
+      `${JSON.stringify({ method: 'initialize', params: { cwd: this.options.cwd } })}\n`,
+    );
 
     const initOutcome = await waitForUntil({
       isDone: () => initialized,
@@ -226,15 +251,23 @@ export class CodexAppServerClient {
       };
     }
 
+    // Step 2: Send thread/start. Reuse an existing thread for continuation turns,
+    // or start a new one. Always include cwd and title for protocol compatibility.
+    const threadTitle = formatThreadTitle(params.identifier, params.title);
     const threadStartParams: Record<string, string> = {
       prompt: params.renderedPrompt,
+      cwd: this.options.cwd,
     };
+    if (threadTitle !== undefined) {
+      threadStartParams.title = threadTitle;
+    }
     if (this.state.threadId) {
       threadStartParams.thread_id = this.state.threadId;
     }
 
     child.stdin.write(`${JSON.stringify({ method: 'thread.start', params: threadStartParams })}\n`);
 
+    // Step 3: Run turns within the thread.
     for (let turn = 1; turn <= this.maxTurns; turn += 1) {
       const message =
         turn === 1
@@ -257,7 +290,7 @@ export class CodexAppServerClient {
       child.stdin.write(`${turnStartMessage}\n`);
 
       const turnOutcome = await waitForUntil({
-        isDone: () => completed,
+        isDone: () => completed || cancelled,
         hasError: () => errorMessage,
         latestEventAt: () => latestEventAt,
         turnTimeoutMs: this.turnTimeoutMs,
@@ -281,6 +314,17 @@ export class CodexAppServerClient {
           activeIssue: false,
           state: this.snapshotState(),
           errorMessage,
+        };
+      }
+
+      // Explicit cancel: the server signalled the turn was cancelled.
+      if (cancelled) {
+        child.stdin?.end();
+        child.kill('SIGTERM');
+        return {
+          status: 'cancelled',
+          activeIssue: false,
+          state: this.snapshotState(),
         };
       }
 
