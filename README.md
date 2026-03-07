@@ -21,7 +21,7 @@ Tell your favorite coding agent to build Symphony in a programming language of y
 
 ### Option 2. Use our experimental reference implementation
 
-Check out this repository for a working reference implementation:
+Check out this repository as an experimental reference implementation and start with:
 
 ```bash
 git clone https://github.com/t0yohei/symphony-github-projects.git
@@ -31,12 +31,16 @@ npm run build
 npm start
 ```
 
-You can also ask a coding agent to set up the project from this SPEC:
+You can also ask a coding agent to help with setup:
 
+> Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/SPEC.md
-> https://github.com/t0yohei/symphony-github-projects/blob/main/SPEC.md
 
 You can use the included GitHub Actions workflow as a smoke-check baseline (`.github/workflows/ci.yml`).
+
+Also keep this repo-spec handy:
+
+- https://github.com/t0yohei/symphony-github-projects/blob/main/SPEC.md
 
 ## How It Works
 
