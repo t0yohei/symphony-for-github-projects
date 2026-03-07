@@ -83,7 +83,7 @@ test('spawns codex app-server with deterministic initialize -> thread/turn order
   assert.equal(writes[2].params.message, 'hello codex');
 });
 
-test('initialize sends cwd in params for protocol compatibility', async () => {
+test('initialize sends cwd, clientInfo, and capabilities for protocol compatibility', async () => {
   const fake = new FakeChildProcess();
 
   const client = new CodexAppServerClient({
@@ -107,6 +107,9 @@ test('initialize sends cwd in params for protocol compatibility', async () => {
   const initMsg = writes.find((w) => w.method === 'initialize');
   assert.ok(initMsg, 'initialize message must be sent');
   assert.equal(initMsg.params.cwd, '/home/user/project');
+  assert.equal(initMsg.params.clientInfo.name, 'symphony-github-projects');
+  assert.equal(initMsg.params.clientInfo.version, '0.1.0');
+  assert.deepEqual(initMsg.params.capabilities, {});
 });
 
 test('thread.start includes formatted title and cwd when identifier and title are provided', async () => {

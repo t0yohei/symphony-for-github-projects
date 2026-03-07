@@ -260,9 +260,15 @@ export class CodexAppServerClient {
     }
 
     // Step 1: Send initialize with workspace cwd to establish the protocol session.
-    child.stdin.write(
-      `${JSON.stringify({ method: 'initialize', params: { cwd: this.options.cwd } })}\n`,
-    );
+    const initializeParams: Record<string, unknown> = {
+      cwd: this.options.cwd,
+      clientInfo: {
+        name: 'symphony-github-projects',
+        version: '0.1.0',
+      },
+      capabilities: {},
+    };
+    child.stdin.write(`${JSON.stringify({ method: 'initialize', params: initializeParams })}\n`);
 
     const initOutcome = await waitForUntil({
       isDone: () => initialized,
