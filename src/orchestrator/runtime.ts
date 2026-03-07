@@ -862,7 +862,9 @@ export class PollingRuntime implements OrchestratorRuntime {
       clearTimeout(current.timer);
     }
 
-    const attempt = (current?.attempt ?? 0) + 1;
+    // Keep retry attempt counters separate per retry kind so normal completion
+    // continuations start from attempt=1 rather than inheriting failure attempts.
+    const attempt = ((current?.kind === kind ? current.attempt : 0) + 1);
     // Failure retry formula: min(base * multiplier^(attempt-1), max_retry_backoff_ms)
     // Default base=10000, multiplier=2 → 10s, 20s, 40s, … capped at max_retry_backoff_ms.
     const delay =

@@ -306,6 +306,35 @@ describe('PollingRuntime state machine', () => {
     assert.deepEqual(runtime.snapshot().running, ['A']);
   });
 
+  it('resets continuation attempt counter after failure retry context', async () => {
+    const now = 3_000;
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+    tracker.states.A = 'in_progress';
+
+    const runtime = new PollingRuntime(tracker, workflow, new FakeLogger(), {
+      ...baseRuntimeOptions,
+      now: () => now,
+      continuationRetryDelayMs: 100,
+      failureRetryBaseDelayMs: 1000,
+    });
+
+    await runtime.tick();
+
+    (runtime as unknown as { retry: Map<string, { issueId: string; identifier: string; item: NormalizedWorkItem; attempt: number; dueAt: number; kind: 'continuation' | 'failure'; }>; }).retry.set('A', {
+      issueId: 'A',
+      identifier: '#101',
+      item: item('A', 101),
+      attempt: 3,
+      dueAt: Number.MAX_SAFE_INTEGER,
+      kind: 'failure',
+    });
+
+    await runtime.handleWorkerExit('A', 'completed');
+    assert.equal(runtime.snapshot().retryAttempts.A, 1);
+  });
+
+
   it('marks item done on worker completion when workflow requires done transition', async () => {
     const tracker = new FakeTracker();
     tracker.items = [item('A', 101)];
