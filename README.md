@@ -1,5 +1,7 @@
 # Symphony for GitHub Projects
 
+- **日本語 README:** [README-ja.md](./README-ja.md)
+
 A TypeScript implementation of [Symphony](https://github.com/openai/symphony) targeting
 **GitHub Projects** as the issue tracker, based on the
 [Symphony SPEC](https://github.com/openai/symphony/blob/main/SPEC.md).
