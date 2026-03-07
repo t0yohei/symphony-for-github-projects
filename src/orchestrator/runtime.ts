@@ -79,6 +79,71 @@ const DEFAULT_FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_FAILURE_RETRY_MULTIPLIER = 2;
 const DEFAULT_FAILURE_RETRY_MAX_DELAY_MS = 60_000;
 
+/**
+ * Error thrown when required workflow config fields are missing or invalid.
+ * Includes a `failingKey` field identifying the config path that failed validation.
+ */
+export class PreflightValidationError extends Error {
+  constructor(
+    message: string,
+    readonly failingKey: string,
+  ) {
+    super(message);
+    this.name = 'PreflightValidationError';
+  }
+}
+
+/**
+ * Validates required workflow config fields (tracker, auth, agent command) without
+ * checking command existence on PATH. Safe to call at startup.
+ *
+ * Throws `PreflightValidationError` with `failingKey` identifying the failing path.
+ */
+export function validateRequiredWorkflowFields(
+  workflow: WorkflowContract,
+  env: Record<string, string | undefined> = process.env,
+): void {
+  const github = workflow.tracker?.github;
+
+  if (typeof github?.owner !== 'string' || github.owner.trim() === '') {
+    throw new PreflightValidationError(
+      'tracker.github.owner is required and must be a non-empty string',
+      'tracker.github.owner',
+    );
+  }
+
+  if (!Number.isInteger(github.projectNumber) || github.projectNumber <= 0) {
+    throw new PreflightValidationError(
+      'tracker.github.projectNumber is required and must be a positive integer',
+      'tracker.github.projectNumber',
+    );
+  }
+
+  const tokenEnv = github.tokenEnv;
+  if (typeof tokenEnv !== 'string' || tokenEnv.trim() === '') {
+    throw new PreflightValidationError(
+      'tracker.github.tokenEnv is required and must be a non-empty string',
+      'tracker.github.tokenEnv',
+    );
+  }
+
+  const token = env[tokenEnv];
+  if (!token || token.trim() === '') {
+    throw new PreflightValidationError(
+      `Environment variable ${tokenEnv} (tracker auth token) is not set`,
+      `env.${tokenEnv}`,
+    );
+  }
+
+  const command = workflow.agent?.command;
+  if (typeof command !== 'string' || command.trim() === '') {
+    throw new PreflightValidationError(
+      'agent.command is required and must be a non-empty string',
+      'agent.command',
+    );
+  }
+}
+
 export class PollingRuntime implements OrchestratorRuntime {
   private readonly running = new Map<string, RunningEntry>();
   private readonly claimed = new Set<string>();
@@ -351,12 +416,24 @@ export class PollingRuntime implements OrchestratorRuntime {
 
   private runDispatchPreflight(): { ok: true } | { ok: false; context: Record<string, unknown> } {
     const github = this.workflow.tracker?.github;
-    if (!github?.owner || !Number.isInteger(github.projectNumber) || github.projectNumber <= 0) {
+
+    if (typeof github?.owner !== 'string' || github.owner.trim() === '') {
       return {
         ok: false,
         context: {
           reason: 'tracker_config_invalid',
+          failing_key: 'tracker.github.owner',
           owner: github?.owner,
+        },
+      };
+    }
+
+    if (!Number.isInteger(github.projectNumber) || github.projectNumber <= 0) {
+      return {
+        ok: false,
+        context: {
+          reason: 'tracker_config_invalid',
+          failing_key: 'tracker.github.projectNumber',
           projectNumber: github?.projectNumber,
         },
       };
@@ -364,21 +441,37 @@ export class PollingRuntime implements OrchestratorRuntime {
 
     const tokenEnv = github.tokenEnv;
     if (typeof tokenEnv !== 'string' || tokenEnv.trim() === '') {
-      return { ok: false, context: { reason: 'tracker_auth_env_missing' } };
+      return {
+        ok: false,
+        context: { reason: 'tracker_auth_env_missing', failing_key: 'tracker.github.tokenEnv' },
+      };
     }
 
     const token = this.env[tokenEnv];
     if (!token || token.trim() === '') {
-      return { ok: false, context: { reason: 'tracker_auth_token_unset', tokenEnv } };
+      return {
+        ok: false,
+        context: {
+          reason: 'tracker_auth_token_unset',
+          failing_key: `env.${tokenEnv}`,
+          tokenEnv,
+        },
+      };
     }
 
     const command = this.workflow.agent?.command;
     if (typeof command !== 'string' || command.trim() === '') {
-      return { ok: false, context: { reason: 'agent_command_missing' } };
+      return {
+        ok: false,
+        context: { reason: 'agent_command_missing', failing_key: 'agent.command' },
+      };
     }
 
     if (!this.commandExists(command)) {
-      return { ok: false, context: { reason: 'agent_command_not_found', command } };
+      return {
+        ok: false,
+        context: { reason: 'agent_command_not_found', failing_key: 'agent.command', command },
+      };
     }
 
     return { ok: true };

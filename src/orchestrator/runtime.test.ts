@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import type { Logger } from '../logging/logger.js';
 import type { NormalizedWorkItem, WorkItemState } from '../model/work-item.js';
-import { PollingRuntime } from './runtime.js';
+import { PollingRuntime, PreflightValidationError, validateRequiredWorkflowFields } from './runtime.js';
 
 class FakeLogger implements Logger {
   public readonly infoLogs: Array<{ message: string; data?: Record<string, unknown> }> = [];
@@ -654,6 +654,79 @@ describe('PollingRuntime state machine', () => {
     assert.deepEqual(tracker.markInProgressCalls, ['A']);
   });
 
+  it('preflight failure includes failing_key in warn log context', async () => {
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+
+    const logger = new FakeLogger();
+    const runtime = new PollingRuntime(
+      tracker,
+      {
+        ...workflow,
+        tracker: {
+          ...workflow.tracker,
+          github: { ...workflow.tracker.github, tokenEnv: 'MISSING_ENV_KEY' },
+        },
+      },
+      logger,
+      { ...baseRuntimeOptions, env: {} },
+    );
+
+    await runtime.tick();
+
+    const preflightWarn = logger.warnLogs.find((log) => log.message === 'runtime.preflight.failed');
+    assert.ok(preflightWarn, 'expected runtime.preflight.failed warn log');
+    assert.equal(preflightWarn?.data?.failing_key, 'env.MISSING_ENV_KEY');
+    assert.equal(preflightWarn?.data?.reason, 'tracker_auth_token_unset');
+    assert.equal(tracker.markInProgressCalls.length, 0);
+  });
+
+  it('preflight failure for missing agent.command includes failing_key', async () => {
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+
+    const logger = new FakeLogger();
+    const runtime = new PollingRuntime(
+      tracker,
+      { ...workflow, agent: { command: '' } },
+      logger,
+      baseRuntimeOptions,
+    );
+
+    await runtime.tick();
+
+    const preflightWarn = logger.warnLogs.find((log) => log.message === 'runtime.preflight.failed');
+    assert.ok(preflightWarn, 'expected runtime.preflight.failed warn log');
+    assert.equal(preflightWarn?.data?.failing_key, 'agent.command');
+    assert.equal(preflightWarn?.data?.reason, 'agent_command_missing');
+    assert.equal(tracker.markInProgressCalls.length, 0);
+  });
+
+  it('preflight failure for missing tracker owner includes failing_key', async () => {
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+
+    const logger = new FakeLogger();
+    const runtime = new PollingRuntime(
+      tracker,
+      {
+        ...workflow,
+        tracker: {
+          ...workflow.tracker,
+          github: { ...workflow.tracker.github, owner: '' },
+        },
+      },
+      logger,
+      baseRuntimeOptions,
+    );
+
+    await runtime.tick();
+
+    const preflightWarn = logger.warnLogs.find((log) => log.message === 'runtime.preflight.failed');
+    assert.ok(preflightWarn);
+    assert.equal(preflightWarn?.data?.failing_key, 'tracker.github.owner');
+  });
+
   it('aggregates usage/runtime metrics and exposes detailed snapshot state', async () => {
     let now = 5_000;
     const tracker = new FakeTracker();
@@ -711,6 +784,71 @@ describe('PollingRuntime state machine', () => {
       logger.infoLogs.some(
         (log) => log.message === 'runtime.transition.metrics' && log.data?.session_id === 'sess-b',
       ),
+    );
+  });
+});
+
+describe('validateRequiredWorkflowFields', () => {
+  const validWorkflow = {
+    tracker: {
+      kind: 'github_projects' as const,
+      github: { owner: 'owner', projectNumber: 1, tokenEnv: 'MY_TOKEN' },
+    },
+    runtime: { pollIntervalMs: 1000, maxConcurrency: 1 },
+    polling: { intervalMs: 1000, maxConcurrency: 1 },
+    workspace: { root: '/tmp', baseDir: '/tmp' },
+    agent: { command: 'codex' },
+  };
+  const validEnv = { MY_TOKEN: 'tok' };
+
+  it('passes for a fully valid config', () => {
+    assert.doesNotThrow(() => validateRequiredWorkflowFields(validWorkflow, validEnv));
+  });
+
+  it('throws PreflightValidationError with failingKey for missing owner', () => {
+    const w = { ...validWorkflow, tracker: { ...validWorkflow.tracker, github: { ...validWorkflow.tracker.github, owner: '' } } };
+    assert.throws(
+      () => validateRequiredWorkflowFields(w, validEnv),
+      (err: unknown) => {
+        assert.ok(err instanceof PreflightValidationError);
+        assert.equal(err.failingKey, 'tracker.github.owner');
+        return true;
+      },
+    );
+  });
+
+  it('throws PreflightValidationError with failingKey for invalid projectNumber', () => {
+    const w = { ...validWorkflow, tracker: { ...validWorkflow.tracker, github: { ...validWorkflow.tracker.github, projectNumber: 0 } } };
+    assert.throws(
+      () => validateRequiredWorkflowFields(w, validEnv),
+      (err: unknown) => {
+        assert.ok(err instanceof PreflightValidationError);
+        assert.equal(err.failingKey, 'tracker.github.projectNumber');
+        return true;
+      },
+    );
+  });
+
+  it('throws PreflightValidationError with failingKey for unset token env var', () => {
+    assert.throws(
+      () => validateRequiredWorkflowFields(validWorkflow, {}),
+      (err: unknown) => {
+        assert.ok(err instanceof PreflightValidationError);
+        assert.equal(err.failingKey, 'env.MY_TOKEN');
+        return true;
+      },
+    );
+  });
+
+  it('throws PreflightValidationError with failingKey for missing agent command', () => {
+    const w = { ...validWorkflow, agent: { command: '' } };
+    assert.throws(
+      () => validateRequiredWorkflowFields(w, validEnv),
+      (err: unknown) => {
+        assert.ok(err instanceof PreflightValidationError);
+        assert.equal(err.failingKey, 'agent.command');
+        return true;
+      },
     );
   });
 });

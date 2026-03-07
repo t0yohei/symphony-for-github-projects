@@ -1,5 +1,10 @@
 import { JsonConsoleLogger, type Logger } from './logging/logger.js';
-import { PollingRuntime, type OrchestratorRuntime } from './orchestrator/runtime.js';
+import {
+  PollingRuntime,
+  PreflightValidationError,
+  validateRequiredWorkflowFields,
+  type OrchestratorRuntime,
+} from './orchestrator/runtime.js';
 import { GitHubProjectsAdapter, type TrackerAdapter } from './tracker/adapter.js';
 import { GraphQLClient } from './tracker/graphql-client.js';
 import { GitHubProjectsGraphQLClient } from './tracker/github-projects-client.js';
@@ -37,6 +42,20 @@ export async function bootstrapFromWorkflow(
   const logger = deps.logger ?? new JsonConsoleLogger();
 
   const workflow = await workflowLoader.load(workflowPath);
+
+  // Validate required config fields at startup; surface structured errors before any I/O.
+  // Skip when a custom trackerAdapter is injected (test/override path).
+  if (!deps.trackerAdapter) {
+    try {
+      validateRequiredWorkflowFields(workflow);
+    } catch (err) {
+      if (err instanceof PreflightValidationError) {
+        throw new BootstrapConfigurationError(`${err.failingKey}: ${err.message}`);
+      }
+      throw err;
+    }
+  }
+
   const tracker = deps.trackerAdapter ?? createTrackerFromWorkflow(workflow);
   const runtime = new PollingRuntime(tracker, workflow, logger);
 
