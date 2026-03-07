@@ -92,29 +92,17 @@ export async function startService(config: ServiceConfig, deps: ServiceDependenc
   const runtime = bootstrapResult.runtime as PollingRuntime;
   let currentPollIntervalMs = bootstrapResult.workflow.polling.intervalMs;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let inFlightTick = false;
   let stopping = false;
 
-  const tick = async (): Promise<void> => {
+  const tick = (): void => {
     if (stopping) return;
-    if (inFlightTick) {
-      logger.warn('runtime.tick.skip_in_progress');
-      return;
-    }
+    scheduleNextTick(currentPollIntervalMs);
 
-    inFlightTick = true;
-    try {
-      await runtime.tick();
-    } catch (error) {
+    void runtime.tick().catch((error) => {
       logger.error('runtime.tick.failed', {
         error: error instanceof Error ? error.message : String(error),
       });
-    } finally {
-      inFlightTick = false;
-      if (!stopping) {
-        scheduleNextTick(currentPollIntervalMs);
-      }
-    }
+    });
   };
 
   const scheduleNextTick = (delayMs: number): void => {
@@ -130,10 +118,18 @@ export async function startService(config: ServiceConfig, deps: ServiceDependenc
     }, Math.max(0, delayMs));
   };
 
+  let bootstrapContractApplied = false;
   const applyWorkflow = (contract: LoadedWorkflowContract): void => {
     try {
+      if (!bootstrapContractApplied && contract === bootstrapResult.workflow) {
+        bootstrapContractApplied = true;
+        return;
+      }
+
+      bootstrapContractApplied = true;
       runtime.applyWorkflow(contract);
-      currentPollIntervalMs = Math.max(1_000, contract.polling.intervalMs);
+      const nextPollIntervalMs = Math.max(1_000, contract.polling.intervalMs);
+      currentPollIntervalMs = nextPollIntervalMs;
       logger.info('runtime.config.reloaded', {
         pollIntervalMs: currentPollIntervalMs,
         maxConcurrency: contract.polling.maxConcurrency,

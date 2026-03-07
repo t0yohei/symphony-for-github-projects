@@ -33,3 +33,13 @@ export {
   type WorkflowConfig,
   type WorkflowDocument,
 } from './workflow/loader.js';
+
+import { startService, parseArgs } from './cli.js';
+
+if (typeof process !== 'undefined' && process.argv[1]?.endsWith('dist/index.js')) {
+  void startService(parseArgs(process.argv.slice(2))).catch((error) => {
+    // eslint-disable-next-line no-console
+    console.error(error);
+    process.exit(1);
+  });
+}

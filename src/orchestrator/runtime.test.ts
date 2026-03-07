@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import type { Logger } from '../logging/logger.js';
 import type { NormalizedWorkItem, WorkItemState } from '../model/work-item.js';
-import { PollingRuntime } from './runtime.js';
+import { PollingRuntime, type PollingRuntimeOptions } from './runtime.js';
 
 class FakeLogger implements Logger {
   public readonly infoLogs: Array<{ message: string; data?: Record<string, unknown> }> = [];
@@ -89,12 +89,38 @@ const workflow = {
   runtime: { pollIntervalMs: 1000, maxConcurrency: 1 },
   polling: { intervalMs: 1000, maxConcurrency: 1 },
   workspace: { root: '/tmp', baseDir: '/tmp' },
+  prompt_template: 'Run issue {{ issue.identifier }}',
   agent: { command: 'codex' },
 };
 
-const baseRuntimeOptions = {
+const baseRuntimeOptions: PollingRuntimeOptions = {
   env: { GITHUB_TOKEN: 'token' },
   commandExists: () => true,
+  workerFactory: () => {
+    const neverResolve: Promise<{
+      status: 'completed' | 'error' | 'rate_limited' | 'timeout' | 'stalled';
+      activeIssue: boolean;
+      state: {
+        sessionId?: string;
+        usage?: {
+          inputTokens?: number;
+          outputTokens?: number;
+          totalTokens?: number;
+        };
+        threadId?: string;
+        turnId?: string;
+      };
+    }> = new Promise(() => {
+      // Keep worker alive for deterministic sync-path tests; tests complete lifecycle through handleWorkerExit.
+    });
+
+    return {
+      run: async () => neverResolve,
+      cancel: () => {
+        // no-op in tests
+      },
+    };
+  },
 };
 
 describe('PollingRuntime state machine', () => {

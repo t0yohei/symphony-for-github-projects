@@ -1,8 +1,12 @@
-import { spawnSync } from 'node:child_process';
 import type { Logger } from '../logging/logger.js';
+import { spawnSync } from 'node:child_process';
+import { renderPromptTemplate } from '../prompt/template.js';
+import { HookRunner } from '../workspace/hooks.js';
+import { WorkspaceManager } from '../workspace/manager.js';
 import type { NormalizedWorkItem, WorkItemState } from '../model/work-item.js';
 import type { TrackerAdapter } from '../tracker/adapter.js';
 import type { WorkflowContract } from '../workflow/contract.js';
+import { CodexAppServerClient } from '../agent/codex-app-server.js';
 
 export interface OrchestratorRuntime {
   tick(): Promise<void>;
@@ -26,6 +30,7 @@ export interface RuntimeObservationContext {
   sessionId?: string;
   usage?: Partial<RuntimeUsageTotals>;
   rateLimit?: RuntimeRateLimitSnapshot;
+  error?: string;
 }
 
 export interface RuntimeStateSnapshot {
@@ -33,11 +38,37 @@ export interface RuntimeStateSnapshot {
   claimed: string[];
   retryAttempts: Record<string, number>;
   completed: string[];
-  runningDetails: Array<{ itemId: string; issueIdentifier: string; sessionId?: string }>;
+  runningDetails: Array<{ itemId: string; issueIdentifier: string; sessionId?: string; workspacePath?: string }>;
   retryingDetails: Array<{ itemId: string; issueIdentifier: string; attempt: number; kind: 'continuation' | 'failure'; dueAt: string }>;
   usageTotals: RuntimeUsageTotals;
   aggregateRuntimeSeconds: number;
   latestRateLimit?: RuntimeRateLimitSnapshot;
+}
+
+interface RuntimeWorker {
+  run(params: { renderedPrompt: string; continuationGuidance: string }): Promise<{
+    status: 'completed' | 'error' | 'rate_limited' | 'timeout' | 'stalled';
+    activeIssue: boolean;
+    errorMessage?: string;
+    state: {
+      sessionId?: string;
+      usage?: {
+        inputTokens?: number;
+        outputTokens?: number;
+        totalTokens?: number;
+      };
+      threadId?: string;
+      turnId?: string;
+    };
+  }>;
+  cancel(): void;
+}
+
+interface WorkerFactoryContext {
+  item: NormalizedWorkItem;
+  workspacePath: string;
+  attempt: number | null;
+  onEvent: (event: Record<string, unknown>) => void;
 }
 
 interface RunningEntry {
@@ -45,6 +76,8 @@ interface RunningEntry {
   startedAt: number;
   lastEventAt: number;
   sessionId?: string;
+  worker?: RuntimeWorker;
+  workspacePath?: string;
 }
 
 interface RetryEntry {
@@ -67,6 +100,7 @@ export interface PollingRuntimeOptions {
   failureRetryMaxDelayMs?: number;
   env?: Record<string, string | undefined>;
   commandExists?: (command: string) => boolean;
+  workerFactory?: (ctx: WorkerFactoryContext) => RuntimeWorker;
 }
 
 const DEFAULT_STALL_TIMEOUT_MS = 5 * 60 * 1000;
@@ -91,7 +125,9 @@ export class PollingRuntime implements OrchestratorRuntime {
   private readonly failureRetryMaxDelayMs: number;
   private readonly env: Record<string, string | undefined>;
   private readonly commandExists: (command: string) => boolean;
+  private readonly workerFactory?: (ctx: WorkerFactoryContext) => RuntimeWorker;
   private workflow: WorkflowContract;
+  private readonly workspaceManager: WorkspaceManager;
 
   constructor(
     private readonly tracker: TrackerAdapter,
@@ -110,6 +146,8 @@ export class PollingRuntime implements OrchestratorRuntime {
     this.failureRetryMaxDelayMs = options.failureRetryMaxDelayMs ?? DEFAULT_FAILURE_RETRY_MAX_DELAY_MS;
     this.env = options.env ?? process.env;
     this.commandExists = options.commandExists ?? defaultCommandExists;
+    this.workerFactory = options.workerFactory;
+    this.workspaceManager = this.createWorkspaceManager(workflow);
   }
 
   async tick(): Promise<void> {
@@ -259,12 +297,14 @@ export class PollingRuntime implements OrchestratorRuntime {
     this.observeWorkerExit(entry, context);
     this.running.delete(itemId);
     this.claimed.delete(itemId);
+    this.stopWorker(itemId);
 
     if (result === 'completed') {
       const states = await this.tracker.getStatesByIds([itemId]);
       if (this.isTerminalState(states[itemId])) {
         this.completed.add(itemId);
         this.clearRetry(itemId);
+        await this.cleanupWorkspace(entry.workspacePath);
         this.logger.info('runtime.transition.completed', {
           issue_id: entry.item.id,
           issue_identifier: entry.item.identifier,
@@ -282,6 +322,7 @@ export class PollingRuntime implements OrchestratorRuntime {
         await this.tracker.markDone(itemId);
         this.completed.add(itemId);
         this.clearRetry(itemId);
+        await this.cleanupWorkspace(entry.workspacePath);
         this.logger.info('runtime.transition.mark_done', {
           issue_id: entry.item.id,
           issue_identifier: entry.item.identifier,
@@ -294,7 +335,12 @@ export class PollingRuntime implements OrchestratorRuntime {
         });
         return;
       } catch (err) {
-        this.scheduleRetry(entry.item, 'failure', 'mark_done_failed', err instanceof Error ? err.message : String(err));
+        this.scheduleRetry(
+          entry.item,
+          'failure',
+          'mark_done_failed',
+          err instanceof Error ? err.message : String(err),
+        );
         this.logger.warn('runtime.transition.mark_done_failed', {
           issue_id: entry.item.id,
           issue_identifier: entry.item.identifier,
@@ -304,7 +350,7 @@ export class PollingRuntime implements OrchestratorRuntime {
       }
     }
 
-    this.scheduleRetry(entry.item, 'failure', 'worker_exit_failed');
+    this.scheduleRetry(entry.item, 'failure', context?.error ? 'worker_exit_failed' : 'worker_exit_failed');
   }
 
   snapshot(): RuntimeStateSnapshot {
@@ -322,6 +368,7 @@ export class PollingRuntime implements OrchestratorRuntime {
         itemId,
         issueIdentifier: entry.item.identifier ?? `#${entry.item.number ?? itemId}`,
         sessionId: entry.sessionId,
+        workspacePath: entry.workspacePath,
       })),
       retryingDetails: [...this.retry.entries()].map(([itemId, entry]) => ({
         itemId,
@@ -367,7 +414,7 @@ export class PollingRuntime implements OrchestratorRuntime {
       return { ok: false, context: { reason: 'tracker_auth_token_unset', tokenEnv } };
     }
 
-    const command = this.workflow.agent?.command;
+    const { command } = this.resolveAgentInvocation();
     if (typeof command !== 'string' || command.trim() === '') {
       return { ok: false, context: { reason: 'agent_command_missing' } };
     }
@@ -389,6 +436,7 @@ export class PollingRuntime implements OrchestratorRuntime {
       for (const [itemId, entry] of this.running.entries()) {
         const lastActivityAt = entry.lastEventAt || entry.startedAt;
         if (now - lastActivityAt > this.stallTimeoutMs) {
+          this.stopWorker(itemId);
           this.running.delete(itemId);
           this.claimed.delete(itemId);
           this.scheduleRetry(entry.item, 'failure', 'stalled');
@@ -419,6 +467,7 @@ export class PollingRuntime implements OrchestratorRuntime {
 
       const state = trackerStates[itemId];
       if (!state) {
+        this.stopWorker(itemId);
         this.running.delete(itemId);
         this.claimed.delete(itemId);
         this.scheduleRetry(entry.item, 'failure', 'state_missing');
@@ -426,10 +475,12 @@ export class PollingRuntime implements OrchestratorRuntime {
       }
 
       if (this.isTerminalState(state)) {
+        this.stopWorker(itemId);
         this.running.delete(itemId);
         this.claimed.delete(itemId);
         this.completed.add(itemId);
         this.clearRetry(itemId);
+        await this.cleanupWorkspace(entry.workspacePath);
         this.logger.info('runtime.transition.reconcile_done', {
           issue_id: entry.item.id,
           issue_identifier: entry.item.identifier,
@@ -440,6 +491,7 @@ export class PollingRuntime implements OrchestratorRuntime {
       }
 
       if (!this.isActiveState(state)) {
+        this.stopWorker(itemId);
         this.running.delete(itemId);
         this.claimed.delete(itemId);
         this.clearRetry(itemId);
@@ -520,16 +572,25 @@ export class PollingRuntime implements OrchestratorRuntime {
     try {
       await this.tracker.markInProgress(item.id);
       const now = this.now();
-      this.running.set(item.id, {
+      const entry: RunningEntry = {
         item,
         startedAt: now,
         lastEventAt: now,
-      });
+      };
+      this.running.set(item.id, entry);
       this.clearRetry(item.id);
       this.logger.info('runtime.transition.running', {
         issue_id: item.id,
         issue_identifier: item.identifier,
         session_id: undefined,
+      });
+
+      void this.executeWork(entry).catch((err) => {
+        this.logger.warn('runtime.transition.worker_error', {
+          issue_id: item.id,
+          issue_identifier: item.identifier,
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
       return true;
     } catch (err) {
@@ -542,6 +603,249 @@ export class PollingRuntime implements OrchestratorRuntime {
       });
       return false;
     }
+  }
+
+  private async executeWork(entry: RunningEntry): Promise<void> {
+    const item = entry.item;
+    try {
+      const workspace = await this.workspaceManager.prepareWorkspace(item.id);
+      entry.workspacePath = workspace.path;
+
+      await this.workspaceManager.beforeRun(entry.workspacePath);
+
+      const attempt = this.retry.get(item.id)?.attempt ?? 0;
+      const attemptValue = attempt > 0 ? attempt : null;
+      const promptTemplate =
+        (this.workflow as { prompt_template?: string }).prompt_template ?? 'Run issue {{ issue.identifier }}';
+
+      const renderedPrompt = await renderPromptTemplate(promptTemplate, {
+        issue: item,
+        attempt: attemptValue,
+      });
+
+      this.markActivity(item.id);
+
+      const worker = this.createWorker({
+        item,
+        workspacePath: entry.workspacePath,
+        attempt: attemptValue,
+        onEvent: () => {
+          // no-op; hook for custom worker factories only
+        },
+      });
+      entry.worker = worker;
+
+      const result = await worker.run({
+        renderedPrompt,
+        continuationGuidance: 'Continue from the active issue and finish the task.',
+      });
+
+      await this.workspaceManager.afterRun(entry.workspacePath).catch((error) => {
+        this.logger.warn('runtime.transition.after_run_failed', {
+          issue_id: item.id,
+          issue_identifier: item.identifier,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+
+      await this.handleWorkerExit(item.id, result.status === 'completed' ? 'completed' : 'failed', {
+        sessionId: result.state.sessionId,
+        usage: {
+          inputTokens: result.state.usage?.inputTokens,
+          outputTokens: result.state.usage?.outputTokens,
+          totalTokens: result.state.usage?.totalTokens,
+        },
+        rateLimit:
+          result.status === 'rate_limited'
+            ? {
+                message: result.errorMessage,
+                code: 'rate_limited',
+              }
+            : undefined,
+        error: result.errorMessage,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.warn('runtime.transition.worker_start_failed', {
+        issue_id: item.id,
+        issue_identifier: item.identifier,
+        error: errorMessage,
+      });
+
+      await this.handleWorkerExit(item.id, 'failed', {
+        error: errorMessage,
+      });
+    }
+  }
+
+  private createWorker(ctx: WorkerFactoryContext): RuntimeWorker {
+    if (this.workerFactory) {
+      return this.workerFactory(ctx);
+    }
+
+    const invocation = this.resolveAgentInvocation();
+    const timeoutConfig = this.resolveAgentTimeouts();
+
+    return new CodexAppServerClient({
+      cwd: ctx.workspacePath,
+      env: this.env,
+      command: invocation.command,
+      args: invocation.args,
+      maxTurns: timeoutConfig.maxTurns,
+      turnTimeoutMs: timeoutConfig.turnTimeoutMs,
+      readTimeoutMs: timeoutConfig.readTimeoutMs,
+      stallTimeoutMs: timeoutConfig.stallTimeoutMs,
+      onEvent: (event) => {
+        const sessionId =
+          (readPath(event, ['params.session_id']) as string | undefined) ??
+          (readPath(event, ['params.thread_id']) as string | undefined);
+        const usage = {
+          inputTokens: readNumber(event, [
+            'params.usage.input_tokens',
+            'params.tokens.input',
+            'usage.input_tokens',
+            'tokens.input',
+          ]),
+          outputTokens: readNumber(event, [
+            'params.usage.output_tokens',
+            'params.tokens.output',
+            'usage.output_tokens',
+            'tokens.output',
+          ]),
+          totalTokens: readNumber(event, [
+            'params.usage.total_tokens',
+            'params.tokens.total',
+            'usage.total_tokens',
+            'tokens.total',
+          ]),
+        };
+
+        const rateLimit = readBoolean(event, [
+          'params.rate_limited',
+          'rate_limited',
+          'error.rate_limited',
+        ])
+          ? {
+              message: readString(event, ['params.error.message', 'error.message']) ?? 'Rate limit reached',
+              code: 'rate_limited',
+            }
+          : undefined;
+
+        this.markActivity(ctx.item.id);
+        this.observeSession(ctx.item.id, {
+          sessionId,
+          usage: {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            totalTokens: usage.totalTokens,
+          },
+          rateLimit,
+        });
+
+        ctx.onEvent(event);
+      },
+    });
+  }
+
+  private resolveAgentInvocation(): { command: string; args: string[] } {
+    const commandSpec = this.workflow.agent.command ?? '';
+    const configuredArgs = this.workflow.agent.args;
+    const parts = commandSpec
+      .trim()
+      .split(/\s+/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    if (configuredArgs && configuredArgs.length > 0) {
+      return {
+        command: parts[0] || 'codex',
+        args: configuredArgs,
+      };
+    }
+
+    if (parts.length === 0) {
+      return {
+        command: 'codex',
+        args: ['app-server'],
+      };
+    }
+
+    return {
+      command: parts[0],
+      args: parts.slice(1).length > 0 ? parts.slice(1) : ['app-server'],
+    };
+  }
+
+  private resolveAgentTimeouts(): {
+    maxTurns?: number;
+    turnTimeoutMs?: number;
+    readTimeoutMs?: number;
+    stallTimeoutMs?: number;
+  } {
+    return {
+      maxTurns: this.workflow.agent?.maxTurns,
+      turnTimeoutMs: this.workflow.agent?.timeouts?.turnTimeoutMs,
+      readTimeoutMs: this.workflow.agent?.timeouts?.readTimeoutMs,
+      stallTimeoutMs: this.workflow.agent?.timeouts?.stallTimeoutMs,
+    };
+  }
+
+  private stopWorker(itemId: string): void {
+    const entry = this.running.get(itemId);
+    if (!entry?.worker) {
+      return;
+    }
+    entry.worker.cancel();
+    entry.worker = undefined;
+  }
+
+  private async cleanupWorkspace(workspacePath?: string): Promise<void> {
+    if (!workspacePath) return;
+    try {
+      await this.workspaceManager.cleanupWorkspace(workspacePath);
+    } catch (error) {
+      this.logger.warn('runtime.workspace.cleanup_failed', {
+        workspacePath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private createWorkspaceManager(workflow: WorkflowContract): WorkspaceManager {
+    const workspaceRoot = workflow.workspace?.root ?? workflow.workspace?.baseDir;
+    if (!workspaceRoot) {
+      throw new Error('workflow.workspace.root is required');
+    }
+
+    const hooks = this.resolveWorkspaceHooks(workflow);
+    return new WorkspaceManager({
+      workspaceRoot,
+      hooks: hooks ? new HookRunner({ hooks, logger: this.logger }) : undefined,
+    });
+  }
+
+  private resolveWorkspaceHooks(workflow: WorkflowContract): {
+    after_create?: string;
+    before_run?: string;
+    after_run?: string;
+    before_remove?: string;
+  } | undefined {
+    if (!workflow.hooks) return undefined;
+
+    const afterRun = [
+      workflow.hooks.after_run,
+      workflow.hooks.onSuccess,
+      workflow.hooks.onFailure,
+    ]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n');
+
+    return {
+      after_create: workflow.hooks.after_create,
+      before_run: workflow.hooks.before_run ?? workflow.hooks.onStart,
+      after_run: afterRun.length > 0 ? afterRun : undefined,
+      before_remove: workflow.hooks.before_remove,
+    };
   }
 
   private scheduleRetry(
@@ -681,22 +985,12 @@ export class PollingRuntime implements OrchestratorRuntime {
 
   private isActiveState(state: WorkItemState | undefined): boolean {
     if (!state) return false;
-    return this.resolveActiveStates().has(normalizeStateKey(state));
+    return this.resolveConfiguredStates('active_states', ['todo', 'in_progress', 'blocked']).has(normalizeStateKey(state));
   }
 
   private isTerminalState(state: WorkItemState | undefined): boolean {
     if (!state) return false;
-    return this.resolveTerminalStates().has(normalizeStateKey(state));
-  }
-
-  private resolveActiveStates(): Set<string> {
-    const defaults = ['todo', 'in_progress', 'blocked'];
-    return this.resolveConfiguredStates('active_states', defaults);
-  }
-
-  private resolveTerminalStates(): Set<string> {
-    const defaults = ['done'];
-    return this.resolveConfiguredStates('terminal_states', defaults);
+    return this.resolveConfiguredStates('terminal_states', ['done']).has(normalizeStateKey(state));
   }
 
   private resolveConfiguredStates(key: 'active_states' | 'terminal_states', defaults: string[]): Set<string> {
@@ -769,4 +1063,46 @@ function sortCandidates(items: NormalizedWorkItem[]): NormalizedWorkItem[] {
 
     return 0;
   });
+}
+
+function readPath(event: Record<string, unknown>, path: string | string[]): unknown {
+  const parts = Array.isArray(path) ? path : path.split('.');
+  let current: unknown = event;
+  for (const part of parts) {
+    if (typeof current !== 'object' || current === null) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function readString(event: Record<string, unknown>, paths: string[]): string | undefined {
+  for (const path of paths) {
+    const value = readPath(event, path);
+    if (typeof value === 'string' && value.trim() !== '') {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function readNumber(event: Record<string, unknown>, paths: string[]): number | undefined {
+  for (const path of paths) {
+    const value = readPath(event, path);
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function readBoolean(event: Record<string, unknown>, paths: string[]): boolean | undefined {
+  for (const path of paths) {
+    const value = readPath(event, path);
+    if (typeof value === 'boolean') {
+      return value;
+    }
+  }
+  return undefined;
 }

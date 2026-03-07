@@ -39,6 +39,7 @@ export interface CodexAppServerClientOptions {
   readTimeoutMs?: number;
   stallTimeoutMs?: number;
   spawn?: SpawnLike;
+  onEvent?: (event: Record<string, unknown>) => void;
 }
 
 interface JsonRpcEvent {
@@ -91,6 +92,8 @@ export class CodexAppServerClient {
   private readonly command: string;
   private readonly args: string[];
   private readonly spawnProc: SpawnLike;
+  private readonly onEvent?: (event: Record<string, unknown>) => void;
+  private activeProcess?: ChildProcessLike;
 
   constructor(private readonly options: CodexAppServerClientOptions) {
     this.maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
@@ -107,18 +110,11 @@ export class CodexAppServerClient {
           args,
           spawnOptions as unknown as Parameters<typeof nodeSpawn>[2],
         ) as ChildProcess);
+    this.onEvent = options.onEvent;
   }
 
-  async run(params: RunTurnParams): Promise<CodexTurnResult> {
-    const child = this.spawnProc(this.command, this.args, {
-      cwd: this.options.cwd,
-      env: {
-        ...process.env,
-        ...(this.options.env ?? {}),
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
+  run(params: RunTurnParams): Promise<CodexTurnResult> {
+    let child: ChildProcessLike;
     let lineBuffer = '';
     let latestEventAt = Date.now();
     let completed = false;
@@ -126,138 +122,119 @@ export class CodexAppServerClient {
     let errorMessage: string | undefined;
     let initialized = false;
 
-    child.stdout?.on('data', (chunk: Buffer | string) => {
+    this.activeProcess = undefined;
+
+    const emitEvent = (event: JsonRpcEvent): void => {
+      try {
+        this.applyEvent(event);
+      } catch {
+        // no-op
+      }
+
+      if (this.onEvent) {
+        this.onEvent(event);
+      }
+    };
+
+
+    const handleMessage = (line: string): void => {
+      const trimmed = line.trim();
+      if (trimmed === '') return;
+      try {
+        const parsed = JSON.parse(trimmed) as JsonRpcEvent;
+        emitEvent(parsed);
+
+        const initializedFlag = readBoolean(parsed, [
+          'params.initialized',
+          'initialized',
+          'params.ready',
+          'ready',
+        ]);
+        if (initializedFlag === true || this.isInitializedEvent(parsed)) {
+          initialized = true;
+        }
+
+        const completedFlag = readBoolean(parsed, [
+          'params.turn.completed',
+          'params.completed',
+          'turn.completed',
+          'completed',
+        ]);
+        if (completedFlag) {
+          completed = true;
+          this.state.turnsCompleted += 1;
+        }
+
+        const activeIssueFlag = readBoolean(parsed, [
+          'params.turn.active_issue',
+          'params.active_issue',
+          'turn.active_issue',
+          'active_issue',
+        ]);
+        if (activeIssueFlag !== undefined) {
+          activeIssue = activeIssueFlag;
+        }
+
+        const rateLimited = readBoolean(parsed, [
+          'params.rate_limited',
+          'rate_limited',
+          'error.rate_limited',
+        ]);
+        if (rateLimited) {
+          errorMessage =
+            readString(parsed, ['params.error.message', 'error.message']) ?? 'rate limited';
+        }
+
+        const eventError = readString(parsed, ['params.error.message', 'error.message']);
+        if (eventError) {
+          errorMessage = eventError;
+        }
+      } catch {
+        // Ignore non-JSON log lines.
+      }
+    };
+
+    const processLine = (chunk: Buffer | string): void => {
       latestEventAt = Date.now();
       lineBuffer += chunk.toString();
       let idx = lineBuffer.indexOf('\n');
       while (idx >= 0) {
-        const line = lineBuffer.slice(0, idx).trim();
+        const line = lineBuffer.slice(0, idx);
         lineBuffer = lineBuffer.slice(idx + 1);
-        if (line !== '') {
-          this.handleEventLine(line, (event) => {
-            this.applyEvent(event);
-
-            const initializedFlag = readBoolean(event, [
-              'params.initialized',
-              'initialized',
-              'params.ready',
-              'ready',
-            ]);
-            if (initializedFlag === true || this.isInitializedEvent(event)) {
-              initialized = true;
-            }
-
-            const completedFlag = readBoolean(event, [
-              'params.turn.completed',
-              'params.completed',
-              'turn.completed',
-              'completed',
-            ]);
-            if (completedFlag) {
-              completed = true;
-              this.state.turnsCompleted += 1;
-            }
-            const activeIssueFlag = readBoolean(event, [
-              'params.turn.active_issue',
-              'params.active_issue',
-              'turn.active_issue',
-              'active_issue',
-            ]);
-            if (activeIssueFlag !== undefined) {
-              activeIssue = activeIssueFlag;
-            }
-            const rateLimited = readBoolean(event, [
-              'params.rate_limited',
-              'rate_limited',
-              'error.rate_limited',
-            ]);
-            if (rateLimited) {
-              errorMessage =
-                readString(event, ['params.error.message', 'error.message']) ?? 'rate limited';
-            }
-            const eventError = readString(event, ['params.error.message', 'error.message']);
-            if (eventError) {
-              errorMessage = eventError;
-            }
-          });
-        }
+        handleMessage(line);
         idx = lineBuffer.indexOf('\n');
       }
-    });
-
-    child.stderr?.on('data', (chunk: Buffer | string) => {
-      const text = chunk.toString().trim();
-      if (text !== '') {
-        errorMessage = text;
-      }
-    });
-
-    if (!child.stdin) {
-      throw new Error('codex app-server stdin is not available');
-    }
-
-    child.stdin.write(`${JSON.stringify({ method: 'initialize', params: {} })}\n`);
-
-    const initOutcome = await waitForUntil({
-      isDone: () => initialized,
-      hasError: () => errorMessage,
-      latestEventAt: () => latestEventAt,
-      turnTimeoutMs: this.turnTimeoutMs,
-      readTimeoutMs: this.readTimeoutMs,
-      stallTimeoutMs: this.stallTimeoutMs,
-    });
-
-    if (initOutcome === 'stalled') {
-      child.kill('SIGTERM');
-      return { status: 'stalled', activeIssue: false, state: this.snapshotState() };
-    }
-    if (initOutcome === 'timeout') {
-      child.kill('SIGTERM');
-      return { status: 'timeout', activeIssue: false, state: this.snapshotState() };
-    }
-    if (errorMessage) {
-      const status = /rate\s*limit/i.test(errorMessage) ? 'rate_limited' : 'error';
-      child.kill('SIGTERM');
-      return {
-        status,
-        activeIssue: false,
-        state: this.snapshotState(),
-        errorMessage,
-      };
-    }
-
-    const threadStartParams: Record<string, string> = {
-      prompt: params.renderedPrompt,
     };
-    if (this.state.threadId) {
-      threadStartParams.thread_id = this.state.threadId;
-    }
 
-    child.stdin.write(`${JSON.stringify({ method: 'thread.start', params: threadStartParams })}\n`);
+    const runLoop = async (): Promise<CodexTurnResult> => {
+      child = this.spawnProc(this.command, this.args, {
+        cwd: this.options.cwd,
+        env: {
+          ...process.env,
+          ...(this.options.env ?? {}),
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
 
-    for (let turn = 1; turn <= this.maxTurns; turn += 1) {
-      const message =
-        turn === 1
-          ? params.renderedPrompt
-          : (params.continuationGuidance ?? 'Continue from the active issue and finish the task.');
+      this.activeProcess = child;
 
-      const turnParams: Record<string, string | number> = {
-        message,
-        turn,
-      };
-      if (this.state.threadId) {
-        turnParams.thread_id = this.state.threadId;
+      child.stdout?.on('data', processLine);
+      child.stderr?.on('data', (chunk: Buffer | string) => {
+        latestEventAt = Date.now();
+        const text = chunk.toString().trim();
+        if (text !== '') {
+          errorMessage = text;
+        }
+      });
+
+      if (!child.stdin) {
+        throw new Error('codex app-server stdin is not available');
       }
 
-      const turnStartMessage = JSON.stringify({
-        method: 'turn.start',
-        params: turnParams,
-      });
-      this.state.turnsStarted += 1;
-      child.stdin.write(`${turnStartMessage}\n`);
+      child.stdin.write(`${JSON.stringify({ method: 'initialize', params: {} })}\n`);
 
-      const turnOutcome = await waitForUntil({
-        isDone: () => completed,
+      const initOutcome = await waitForUntil({
+        isDone: () => initialized,
         hasError: () => errorMessage,
         latestEventAt: () => latestEventAt,
         turnTimeoutMs: this.turnTimeoutMs,
@@ -265,17 +242,17 @@ export class CodexAppServerClient {
         stallTimeoutMs: this.stallTimeoutMs,
       });
 
-      if (turnOutcome === 'stalled') {
-        child.kill('SIGTERM');
-        return { status: 'stalled', activeIssue: false, state: this.snapshotState() };
+      if (initOutcome === 'stalled') {
+        this.terminate(child, 'stalled');
+        return { status: 'stalled', activeIssue: false, state: this.snapshotState(), errorMessage: 'startup stalled' };
       }
-      if (turnOutcome === 'timeout') {
-        child.kill('SIGTERM');
-        return { status: 'timeout', activeIssue: false, state: this.snapshotState() };
+      if (initOutcome === 'timeout') {
+        this.terminate(child, 'timeout');
+        return { status: 'timeout', activeIssue: false, state: this.snapshotState(), errorMessage: 'startup timeout' };
       }
       if (errorMessage) {
         const status = /rate\s*limit/i.test(errorMessage) ? 'rate_limited' : 'error';
-        child.kill('SIGTERM');
+        this.terminate(child, 'initialization error');
         return {
           status,
           activeIssue: false,
@@ -284,39 +261,116 @@ export class CodexAppServerClient {
         };
       }
 
-      completed = false;
-      if (!activeIssue) {
-        child.stdin?.end();
-        child.kill('SIGTERM');
-        return {
-          status: 'completed',
-          activeIssue: false,
-          state: this.snapshotState(),
-        };
+      const threadStartParams: Record<string, string> = {
+        prompt: params.renderedPrompt,
+      };
+      if (this.state.threadId) {
+        threadStartParams.thread_id = this.state.threadId;
       }
-    }
 
-    child.stdin?.end();
-    child.kill('SIGTERM');
+      child.stdin.write(`${JSON.stringify({ method: 'thread.start', params: threadStartParams })}\n`);
+
+      for (let turn = 1; turn <= this.maxTurns; turn += 1) {
+        const message =
+          turn === 1
+            ? params.renderedPrompt
+            : (params.continuationGuidance ?? 'Continue from the active issue and finish the task.');
+
+        const turnParams: Record<string, string | number> = {
+          message,
+          turn,
+        };
+        if (this.state.threadId) {
+          turnParams.thread_id = this.state.threadId;
+        }
+
+        const turnStartMessage = JSON.stringify({
+          method: 'turn.start',
+          params: turnParams,
+        });
+
+        this.state.turnsStarted += 1;
+        child.stdin.write(`${turnStartMessage}\n`);
+
+        const turnOutcome = await waitForUntil({
+          isDone: () => completed,
+          hasError: () => errorMessage,
+          latestEventAt: () => latestEventAt,
+          turnTimeoutMs: this.turnTimeoutMs,
+          readTimeoutMs: this.readTimeoutMs,
+          stallTimeoutMs: this.stallTimeoutMs,
+        });
+
+        if (turnOutcome === 'stalled') {
+          this.terminate(child, 'turn stalled');
+          return { status: 'stalled', activeIssue: false, state: this.snapshotState() };
+        }
+        if (turnOutcome === 'timeout') {
+          this.terminate(child, 'turn timeout');
+          return { status: 'timeout', activeIssue: false, state: this.snapshotState() };
+        }
+        if (errorMessage) {
+          const status = /rate\s*limit/i.test(errorMessage) ? 'rate_limited' : 'error';
+          this.terminate(child, 'turn error');
+          return {
+            status,
+            activeIssue: false,
+            state: this.snapshotState(),
+            errorMessage,
+          };
+        }
+
+        completed = false;
+        if (!activeIssue) {
+          child.stdin?.end();
+          this.terminate(child, 'completed');
+          return {
+            status: 'completed',
+            activeIssue: false,
+            state: this.snapshotState(),
+          };
+        }
+      }
+
+      child.stdin?.end();
+      this.terminate(child, 'completed-need-more-turns');
+      return {
+        status: 'completed',
+        activeIssue: true,
+        state: this.snapshotState(),
+      };
+    };
+
+    return runLoop().finally(() => {
+      this.activeProcess = undefined;
+    });
+  }
+
+  cancel(): void {
+    if (this.activeProcess) {
+      this.activeProcess.kill('SIGTERM');
+      this.activeProcess = undefined;
+    }
+  }
+
+  snapshotState(): CodexSessionState {
     return {
-      status: 'completed',
-      activeIssue: true,
-      state: this.snapshotState(),
+      sessionId: this.state.sessionId,
+      threadId: this.state.threadId,
+      turnId: this.state.turnId,
+      turnsStarted: this.state.turnsStarted,
+      turnsCompleted: this.state.turnsCompleted,
+      usage: {
+        inputTokens: this.state.usage.inputTokens,
+        outputTokens: this.state.usage.outputTokens,
+        totalTokens: this.state.usage.totalTokens,
+      },
     };
   }
 
   private isInitializedEvent(event: JsonRpcEvent): boolean {
     const method = readString(event, ['method', 'event', 'type']);
     return method === 'initialized' || method === 'initialize.done';
-  }
-
-  private handleEventLine(line: string, onEvent: (event: JsonRpcEvent) => void): void {
-    try {
-      const parsed = JSON.parse(line) as JsonRpcEvent;
-      onEvent(parsed);
-    } catch {
-      // Ignore non-JSON log lines.
-    }
   }
 
   private applyEvent(event: JsonRpcEvent): void {
@@ -362,19 +416,9 @@ export class CodexAppServerClient {
     }
   }
 
-  private snapshotState(): CodexSessionState {
-    return {
-      sessionId: this.state.sessionId,
-      threadId: this.state.threadId,
-      turnId: this.state.turnId,
-      turnsStarted: this.state.turnsStarted,
-      turnsCompleted: this.state.turnsCompleted,
-      usage: {
-        inputTokens: this.state.usage.inputTokens,
-        outputTokens: this.state.usage.outputTokens,
-        totalTokens: this.state.usage.totalTokens,
-      },
-    };
+  private terminate(child: ChildProcessLike, reason: string): void {
+    void reason;
+    child.kill('SIGTERM');
   }
 }
 
@@ -452,3 +496,4 @@ function readPath(event: JsonRpcEvent, path: string): unknown {
   }
   return current;
 }
+

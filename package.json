@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "symphony-github-projects": "dist/cli.js"
+    "symphony-github-projects": "dist/index.js",
+    "symphony-github-projects-cli": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -15,7 +16,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "npm run build && node --test dist/**/*.test.js",
-    "start": "node dist/cli.js"
+    "start": "node dist/index.js"
   },
   "engines": {
     "node": ">=20"
