@@ -380,8 +380,11 @@ export class PollingRuntime implements OrchestratorRuntime {
         return;
       }
 
+      // Normal worker exit follows continuation retry semantics first, even when
+      // explicit mark-done-on-completion behavior is enabled.
+      this.scheduleRetry(entry.item, 'continuation', 'worker_exit_completed');
+
       if (!this.shouldMarkDoneOnCompletion()) {
-        this.scheduleRetry(entry.item, 'continuation', 'worker_exit_completed');
         return;
       }
 
@@ -400,16 +403,14 @@ export class PollingRuntime implements OrchestratorRuntime {
           issue_identifier: entry.item.identifier,
           session_id: entry.sessionId,
         });
-        return;
       } catch (err) {
-        this.scheduleRetry(entry.item, 'failure', 'mark_done_failed', err instanceof Error ? err.message : String(err));
         this.logger.warn('runtime.transition.mark_done_failed', {
           issue_id: entry.item.id,
           issue_identifier: entry.item.identifier,
           error: err instanceof Error ? err.message : String(err),
         });
-        return;
       }
+      return;
     }
 
     this.scheduleRetry(entry.item, 'failure', 'worker_exit_failed');
