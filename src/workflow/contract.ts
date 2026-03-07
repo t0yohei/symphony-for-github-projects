@@ -10,7 +10,8 @@ export type WorkflowValidationErrorCode =
   | 'runtime.pollIntervalMs.invalid'
   | 'runtime.maxConcurrency.invalid'
   | 'workspace.root.required'
-  | 'agent.command.required';
+  | 'agent.command.required'
+  | 'workflow.unknown_key';
 
 export interface WorkflowValidationError {
   code: WorkflowValidationErrorCode;
@@ -258,6 +259,65 @@ export function validateWorkflowContract(input: unknown): WorkflowValidationErro
 
   const record = input as Record<string, unknown>;
 
+  validateNoUnknownKeys(record, new Set(['tracker', 'runtime', 'polling', 'workspace', 'agent', 'hooks', 'extensions']), '', errors);
+  validateKnownObject(record, ['tracker'], new Set(['kind', 'github', 'auth']), 'tracker', errors);
+  validateKnownObject(record, ['tracker', 'github'], new Set(['owner', 'projectNumber', 'tokenEnv', 'type']), 'tracker.github', errors);
+  validateKnownObject(record, ['tracker', 'auth'], new Set(['tokenEnv']), 'tracker.auth', errors);
+  validateKnownObject(record, ['runtime'], new Set(['pollIntervalMs', 'poll_interval_ms', 'maxConcurrency', 'max_concurrency', 'retry']), 'runtime', errors);
+  validateKnownObject(record, ['runtime', 'retry'],
+    new Set([
+      'continuationDelayMs',
+      'continuation_delay_ms',
+      'failureBaseDelayMs',
+      'failure_base_delay_ms',
+      'failureMultiplier',
+      'failure_multiplier',
+      'failureMaxDelayMs',
+      'failure_max_delay_ms',
+      'failureBackoffMs',
+      'failure_backoff_ms',
+    ]),
+    'runtime.retry',
+    errors,
+  );
+  validateKnownObject(record, ['polling'], new Set(['intervalMs', 'maxConcurrency']), 'polling', errors);
+  validateKnownObject(record, ['workspace'], new Set(['root', 'baseDir']), 'workspace', errors);
+  validateKnownObject(record, ['agent'],
+    new Set([
+      'command',
+      'args',
+      'maxTurns',
+      'max_turns',
+      'timeouts',
+      'turnTimeoutMs',
+      'turn_timeout_ms',
+      'readTimeoutMs',
+      'read_timeout_ms',
+      'stallTimeoutMs',
+      'stall_timeout_ms',
+      'hooksTimeoutMs',
+      'hooks_timeout_ms',
+    ]),
+    'agent',
+    errors,
+  );
+  validateKnownObject(record, ['agent', 'timeouts'],
+    new Set([
+      'turnTimeoutMs',
+      'turn_timeout_ms',
+      'readTimeoutMs',
+      'read_timeout_ms',
+      'stallTimeoutMs',
+      'stall_timeout_ms',
+      'hooksTimeoutMs',
+      'hooks_timeout_ms',
+    ]),
+    'agent.timeouts',
+    errors,
+  );
+  validateKnownObject(record, ['hooks'], new Set(['after_create', 'before_run', 'after_run', 'before_remove', 'onStart', 'onSuccess', 'onFailure']), 'hooks', errors);
+  validateKnownObject(record, ['extensions'], new Set(['github_projects']), 'extensions', errors);
+
   const trackerKind = coerceString(readPath(record, ['tracker', 'kind']));
   if (trackerKind === undefined) {
     errors.push({
@@ -362,6 +422,64 @@ export function validateWorkflowContract(input: unknown): WorkflowValidationErro
   }
 
   return errors;
+}
+
+
+function validateKnownObject(
+  input: Record<string, unknown>,
+  path: string[],
+  allowedKeys: Set<string>,
+  pathLabel: string,
+  errors: WorkflowValidationError[],
+): void {
+  const obj = getPathValue(input, path);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return;
+  }
+
+  for (const key of Object.keys(obj as Record<string, unknown>)) {
+    if (!allowedKeys.has(key)) {
+      const fullPath = pathLabel ? `${pathLabel}.${key}` : key;
+      errors.push({
+        code: 'workflow.unknown_key',
+        path: fullPath,
+        message: `Unknown configuration key: ${fullPath}`,
+      });
+    }
+  }
+}
+
+function validateNoUnknownKeys(
+  input: Record<string, unknown>,
+  allowedTopKeys: Set<string>,
+  pathLabel: string,
+  errors: WorkflowValidationError[],
+): void {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return;
+  }
+
+  for (const key of Object.keys(input)) {
+    if (!allowedTopKeys.has(key)) {
+      const fullPath = pathLabel ? `${pathLabel}.${key}` : key;
+      errors.push({
+        code: 'workflow.unknown_key',
+        path: fullPath,
+        message: `Unknown configuration key: ${fullPath}`,
+      });
+    }
+  }
+}
+
+function getPathValue(input: Record<string, unknown>, path: string[]): unknown {
+  let cursor: unknown = input;
+  for (const key of path) {
+    if (typeof cursor !== 'object' || cursor === null || Array.isArray(cursor)) {
+      return undefined;
+    }
+    cursor = (cursor as Record<string, unknown>)[key];
+  }
+  return cursor;
 }
 
 function readPath(input: Record<string, unknown>, path: string[]): unknown {
