@@ -423,6 +423,50 @@ describe('PollingRuntime state machine', () => {
     assert.equal(runtime.snapshot().running.length, 1);
   });
 
+  it('refreshes running entry snapshot when active state persists', async () => {
+    const tracker = new FakeTracker();
+    tracker.items = [
+      {
+        ...item('A', 101),
+        priority: 10,
+        state: 'todo',
+      },
+    ];
+    tracker.states.A = 'todo';
+
+    const runtime = new PollingRuntime(tracker, workflow, new FakeLogger(), {
+      ...baseRuntimeOptions,
+      now: () => 1_000,
+      workerFactory: () => neverFinishWorker,
+    });
+
+    await runtime.tick();
+    assert.equal(
+      (runtime as unknown as { running: Map<string, { item: { priority?: number } }> }).running.get('A')?.item.priority,
+      10,
+    );
+
+    tracker.states.A = 'in_progress';
+    tracker.items = [
+      {
+        ...item('A', 101),
+        priority: 1,
+        state: 'in_progress',
+      },
+    ];
+
+    await runtime.tick();
+
+    assert.equal(
+      (runtime as unknown as { running: Map<string, { item: { priority?: number; state?: string } }> }).running.get('A')?.item.priority,
+      1,
+    );
+    assert.equal(
+      (runtime as unknown as { running: Map<string, { item: { priority?: number; state?: string } }> }).running.get('A')?.item.state,
+      'in_progress',
+    );
+  });
+
   it('disables stall detection when stallTimeoutMs is zero or less', async () => {
     let now = 10_000;
     const tracker = new FakeTracker();

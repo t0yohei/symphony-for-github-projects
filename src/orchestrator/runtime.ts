@@ -573,15 +573,28 @@ export class PollingRuntime implements OrchestratorRuntime {
         continue;
       }
 
-      if (!this.isActiveState(state)) {
-        await this.killRunning(itemId, { reason: 'non_active', clearRetry: true });
-        this.logger.info('runtime.transition.reconcile_stopped_non_active', {
-          issue_id: entry.item.id,
-          issue_identifier: entry.item.identifier,
-          session_id: entry.sessionId,
-          state,
-        });
+      if (this.isActiveState(state)) {
+        const refreshedCandidates = await this.tracker.listItemsByStates(Array.from(this.resolveActiveStates()) as WorkItemState[]);
+        const refreshed = refreshedCandidates.find((candidate) => candidate.id === itemId);
+        if (refreshed) {
+          entry.item = refreshed;
+          this.logger.info('runtime.transition.reconcile_running_entry_refreshed', {
+            issue_id: entry.item.id,
+            issue_identifier: entry.item.identifier,
+            state: refreshed.state,
+            priority: refreshed.priority,
+          });
+        }
+        continue;
       }
+
+      await this.killRunning(itemId, { reason: 'non_active', clearRetry: true });
+      this.logger.info('runtime.transition.reconcile_stopped_non_active', {
+        issue_id: entry.item.id,
+        issue_identifier: entry.item.identifier,
+        session_id: entry.sessionId,
+        state,
+      });
     }
   }
 
