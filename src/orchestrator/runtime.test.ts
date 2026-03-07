@@ -158,6 +158,47 @@ describe('PollingRuntime state machine', () => {
     assert.deepEqual(runtime.snapshot().running, ['A']);
   });
 
+
+  it('reads runtime.retry from workflow contract when options are not provided', async () => {
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+    tracker.failMarkInProgressFor.add('A');
+
+    const workflowWithRetry = {
+      ...workflow,
+      runtime: {
+        ...workflow.runtime,
+        retry: {
+          continuationDelayMs: 333,
+          failureBaseDelayMs: 111,
+          failureMultiplier: 3,
+          failureMaxDelayMs: 222,
+        },
+      },
+    };
+
+    const now = 10_000;
+
+    const runtime = new PollingRuntime(
+      tracker,
+      workflowWithRetry,
+      new FakeLogger(),
+      {
+        ...baseRuntimeOptions,
+        now: () => now,
+      },
+    );
+
+    await runtime.tick();
+    const retry1 = (runtime as unknown as { retry: Map<string, { dueAt: number; attempt: number }> }).retry.get(
+      tracker.items[0].id,
+    );
+    assert.ok(retry1);
+    assert.equal(retry1?.attempt, 1);
+    const actualDelay = retry1!.dueAt - now;
+    assert.equal(actualDelay, 111);
+  });
+
   it('failure retry formula: min(base * 2^(attempt-1), max_retry_backoff_ms)', async () => {
     // Spec: min(10000 * 2^(attempt-1), max_retry_backoff_ms)
     // attempts: 1→10000, 2→20000, 3→40000, capped at maxRetryBackoffMs

@@ -34,7 +34,7 @@ class FakeChildProcess extends EventEmitter {
   }
 }
 
-test('spawns codex app-server with deterministic initialize -> thread/turn order', async () => {
+test('spawns codex app-server in shell-compatible command form', async () => {
   const fake = new FakeChildProcess();
   const spawnCalls: Array<{ command: string; args: string[]; cwd: string }> = [];
 
@@ -42,6 +42,51 @@ test('spawns codex app-server with deterministic initialize -> thread/turn order
     cwd: '/tmp/workspace',
     readTimeoutMs: 10,
     stallTimeoutMs: 500,
+    command: 'codex app-server',
+    spawn: (command, args, options) => {
+      spawnCalls.push({ command, args, cwd: options.cwd });
+      queueMicrotask(() => {
+        fake.emitStdoutJson({ method: 'initialized' });
+        fake.emitStdoutJson({
+          params: {
+            session_id: 's1',
+            thread_id: 't1',
+            turn_id: 'turn-1',
+            usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13 },
+            turn: { completed: true, active_issue: false },
+          },
+        });
+      });
+      return fake;
+    },
+  });
+
+  const result = await client.run({ renderedPrompt: 'hello codex' });
+
+  assert.equal(spawnCalls.length, 1);
+  assert.deepEqual(spawnCalls[0], {
+    command: 'bash',
+    args: ['-lc', 'codex app-server'],
+    cwd: '/tmp/workspace',
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.activeIssue, false);
+  assert.equal(result.state.sessionId, 's1');
+  assert.equal(result.state.threadId, 't1');
+  assert.equal(result.state.turnId, 'turn-1');
+  assert.equal(result.state.usage.totalTokens, 13);
+});
+
+test('spawns codex with default app-server argv when command is single token', async () => {
+  const fake = new FakeChildProcess();
+  const spawnCalls: Array<{ command: string; args: string[]; cwd: string }> = [];
+
+  const client = new CodexAppServerClient({
+    cwd: '/tmp/workspace',
+    readTimeoutMs: 10,
+    stallTimeoutMs: 500,
+    command: 'codex',
     spawn: (command, args, options) => {
       spawnCalls.push({ command, args, cwd: options.cwd });
       queueMicrotask(() => {

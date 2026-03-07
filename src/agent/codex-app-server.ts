@@ -75,10 +75,10 @@ type SpawnLike = (
 
 /**
  * Default maximum number of agent turns per run().
- * Aligns with Symphony SPEC multi-turn contract: agents may need up to 3 turns
- * for complex tasks while keeping per-issue resource usage bounded.
+ * Aligns with Symphony SPEC contract guidance that a short multi-turn sequence can
+ * reduce churn while preserving bounded execution.
  */
-const DEFAULT_MAX_TURNS = 3;
+const DEFAULT_MAX_TURNS = 20;
 
 /**
  * Default per-turn wall-clock timeout (ms).
@@ -139,8 +139,19 @@ export class CodexAppServerClient {
     this.turnTimeoutMs = options.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
     this.readTimeoutMs = options.readTimeoutMs ?? DEFAULT_READ_TIMEOUT_MS;
     this.stallTimeoutMs = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
-    this.command = options.command ?? 'codex';
-    this.args = options.args ?? ['app-server'];
+
+    const command = options.command ?? 'codex app-server';
+    if (options.args && options.args.length > 0) {
+      this.command = command;
+      this.args = options.args;
+    } else if (command.includes(' ')) {
+      this.command = 'bash';
+      this.args = ['-lc', command];
+    } else {
+      this.command = command;
+      this.args = ['app-server'];
+    }
+
     this.spawnProc =
       options.spawn ??
       ((command, args, spawnOptions) =>

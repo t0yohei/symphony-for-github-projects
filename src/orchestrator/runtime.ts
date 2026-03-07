@@ -95,7 +95,9 @@ const DEFAULT_CONTINUATION_RETRY_DELAY_MS = 1_000;
 /** Failure retry base delay per spec: min(10000 * 2^(attempt-1), max_retry_backoff_ms) */
 const DEFAULT_FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_FAILURE_RETRY_MULTIPLIER = 2;
+/** Default maximum failure retry backoff (spec default: 300_000 ms). */
 const DEFAULT_FAILURE_RETRY_MAX_DELAY_MS = 300_000;
+const DEFAULT_RUNTIME_MAX_CONCURRENCY = 10;
 
 /**
  * Error thrown when required workflow config fields are missing or invalid.
@@ -172,10 +174,10 @@ export class PollingRuntime implements OrchestratorRuntime {
   private latestRateLimit?: RuntimeRateLimitSnapshot;
   private readonly now: () => number;
   private readonly stallTimeoutMs: number;
-  private readonly continuationRetryDelayMs: number;
-  private readonly failureRetryBaseDelayMs: number;
-  private readonly failureRetryMultiplier: number;
-  private readonly failureRetryMaxDelayMs: number;
+  private continuationRetryDelayMs: number;
+  private failureRetryBaseDelayMs: number;
+  private failureRetryMultiplier: number;
+  private failureRetryMaxDelayMs: number;
   private readonly env: Record<string, string | undefined>;
   private readonly commandExists: (command: string) => boolean;
   private readonly workspaceManager: WorkspaceManager;
@@ -186,6 +188,12 @@ export class PollingRuntime implements OrchestratorRuntime {
     workflow: WorkflowContract;
   }) => RuntimeWorker | Promise<RuntimeWorker>;
   private workflow: WorkflowContract;
+  private readonly defaultedRuntimeDelays = {
+    continuationRetryDelayMs: DEFAULT_CONTINUATION_RETRY_DELAY_MS,
+    failureRetryBaseDelayMs: DEFAULT_FAILURE_RETRY_BASE_DELAY_MS,
+    failureRetryMultiplier: DEFAULT_FAILURE_RETRY_MULTIPLIER,
+    failureRetryMaxDelayMs: DEFAULT_FAILURE_RETRY_MAX_DELAY_MS,
+  };
 
   constructor(
     private readonly tracker: TrackerAdapter,
@@ -196,13 +204,22 @@ export class PollingRuntime implements OrchestratorRuntime {
     this.workflow = workflow;
     this.now = options.now ?? (() => Date.now());
     this.stallTimeoutMs = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
-    this.continuationRetryDelayMs =
+
+    this.defaultedRuntimeDelays.continuationRetryDelayMs =
       options.continuationRetryDelayMs ?? DEFAULT_CONTINUATION_RETRY_DELAY_MS;
-    this.failureRetryBaseDelayMs =
+    this.defaultedRuntimeDelays.failureRetryBaseDelayMs =
       options.failureRetryBaseDelayMs ?? DEFAULT_FAILURE_RETRY_BASE_DELAY_MS;
-    this.failureRetryMultiplier = options.failureRetryMultiplier ?? DEFAULT_FAILURE_RETRY_MULTIPLIER;
-    this.failureRetryMaxDelayMs =
+    this.defaultedRuntimeDelays.failureRetryMultiplier =
+      options.failureRetryMultiplier ?? DEFAULT_FAILURE_RETRY_MULTIPLIER;
+    this.defaultedRuntimeDelays.failureRetryMaxDelayMs =
       options.maxRetryBackoffMs ?? options.failureRetryMaxDelayMs ?? DEFAULT_FAILURE_RETRY_MAX_DELAY_MS;
+
+    this.continuationRetryDelayMs = this.defaultedRuntimeDelays.continuationRetryDelayMs;
+    this.failureRetryBaseDelayMs = this.defaultedRuntimeDelays.failureRetryBaseDelayMs;
+    this.failureRetryMultiplier = this.defaultedRuntimeDelays.failureRetryMultiplier;
+    this.failureRetryMaxDelayMs = this.defaultedRuntimeDelays.failureRetryMaxDelayMs;
+
+    this.reconfigureRetryPolicy(workflow);
     this.env = options.env ?? process.env;
     this.commandExists = options.commandExists ?? defaultCommandExists;
     const workspaceRoot = this.workflow.workspace?.baseDir ?? this.workflow.workspace?.root;
@@ -216,6 +233,18 @@ export class PollingRuntime implements OrchestratorRuntime {
         workspaceRoot,
       });
     this.workerFactory = options.workerFactory ?? ((context) => Promise.resolve(this.buildDefaultWorker(context)));
+  }
+
+  private reconfigureRetryPolicy(workflow: WorkflowContract): void {
+    const workflowRetry = workflow.runtime?.retry;
+    this.continuationRetryDelayMs =
+      workflowRetry?.continuationDelayMs ?? this.defaultedRuntimeDelays.continuationRetryDelayMs;
+    this.failureRetryBaseDelayMs =
+      workflowRetry?.failureBaseDelayMs ?? this.defaultedRuntimeDelays.failureRetryBaseDelayMs;
+    this.failureRetryMultiplier =
+      workflowRetry?.failureMultiplier ?? this.defaultedRuntimeDelays.failureRetryMultiplier;
+    this.failureRetryMaxDelayMs =
+      workflowRetry?.failureMaxDelayMs ?? this.defaultedRuntimeDelays.failureRetryMaxDelayMs;
   }
 
   async tick(): Promise<void> {
@@ -447,9 +476,12 @@ export class PollingRuntime implements OrchestratorRuntime {
 
   applyWorkflow(nextWorkflow: WorkflowContract): void {
     this.workflow = nextWorkflow;
+    this.reconfigureRetryPolicy(nextWorkflow);
     this.logger.info('runtime.config.applied', {
       maxConcurrency: nextWorkflow.polling.maxConcurrency ?? 1,
       pollIntervalMs: nextWorkflow.polling.intervalMs,
+      continuationRetryDelayMs: this.continuationRetryDelayMs,
+      failureRetryMaxDelayMs: this.failureRetryMaxDelayMs,
     });
   }
 
@@ -940,7 +972,7 @@ export class PollingRuntime implements OrchestratorRuntime {
   private resolveMaxConcurrency(): number {
     const configured = this.workflow.polling?.maxConcurrency ?? this.workflow.runtime?.maxConcurrency;
     if (typeof configured !== 'number' || !Number.isFinite(configured)) {
-      return 1;
+      return DEFAULT_RUNTIME_MAX_CONCURRENCY;
     }
     return Math.max(0, Math.floor(configured));
   }

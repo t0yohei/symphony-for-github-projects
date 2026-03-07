@@ -165,6 +165,10 @@ export async function bootstrapFromWorkflow(
 
   const runtime = new PollingRuntime(tracker, workflow, logger, {
     workspaceManager,
+    continuationRetryDelayMs: workflow.runtime.retry?.continuationDelayMs,
+    failureRetryBaseDelayMs: workflow.runtime.retry?.failureBaseDelayMs,
+    failureRetryMultiplier: workflow.runtime.retry?.failureMultiplier,
+    maxRetryBackoffMs: workflow.runtime.retry?.failureMaxDelayMs,
   });
 
   logger.info('bootstrap.ready', {
