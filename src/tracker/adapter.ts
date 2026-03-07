@@ -15,10 +15,16 @@ export interface TrackerAdapter {
   markDone(itemId: string): Promise<void>;
 }
 
+export interface TrackerWriter {
+  markInProgress(itemId: string): Promise<void>;
+  markDone(itemId: string): Promise<void>;
+}
+
 export interface GitHubProjectsAdapterOptions {
   owner: string;
   projectNumber: number;
   client: GitHubProjectsClient;
+  writer?: TrackerWriter;
   pageSize?: number;
 }
 
@@ -26,12 +32,14 @@ export class GitHubProjectsAdapter implements TrackerAdapter {
   private readonly owner: string;
   private readonly projectNumber: number;
   private readonly client: GitHubProjectsClient;
+  private readonly writer?: TrackerWriter;
   private readonly defaultPageSize: number;
 
   constructor(options: GitHubProjectsAdapterOptions) {
     this.owner = options.owner;
     this.projectNumber = options.projectNumber;
     this.client = options.client;
+    this.writer = options.writer;
     this.defaultPageSize = options.pageSize ?? 50;
   }
 
@@ -88,12 +96,18 @@ export class GitHubProjectsAdapter implements TrackerAdapter {
     return result;
   }
 
-  async markInProgress(_itemId: string): Promise<void> {
-    throw new Error("Use GitHubProjectsWriter for tracker write operations");
+  async markInProgress(itemId: string): Promise<void> {
+    if (!this.writer) {
+      throw new Error('Tracker writer is not configured');
+    }
+    await this.writer.markInProgress(itemId);
   }
 
-  async markDone(_itemId: string): Promise<void> {
-    throw new Error("Use GitHubProjectsWriter for tracker write operations");
+  async markDone(itemId: string): Promise<void> {
+    if (!this.writer) {
+      throw new Error('Tracker writer is not configured');
+    }
+    await this.writer.markDone(itemId);
   }
 
   private normalizeNode(node: ProjectItemNode): NormalizedWorkItem {

@@ -250,8 +250,35 @@ export class PollingRuntime implements OrchestratorRuntime {
         return;
       }
 
-      this.scheduleRetry(entry.item, 'continuation', 'worker_exit_completed');
-      return;
+      if (!this.shouldMarkDoneOnCompletion()) {
+        this.scheduleRetry(entry.item, 'continuation', 'worker_exit_completed');
+        return;
+      }
+
+      try {
+        await this.tracker.markDone(itemId);
+        this.completed.add(itemId);
+        this.clearRetry(itemId);
+        this.logger.info('runtime.transition.mark_done', {
+          issue_id: entry.item.id,
+          issue_identifier: entry.item.identifier,
+          session_id: entry.sessionId,
+        });
+        this.logger.info('runtime.transition.completed', {
+          issue_id: entry.item.id,
+          issue_identifier: entry.item.identifier,
+          session_id: entry.sessionId,
+        });
+        return;
+      } catch (err) {
+        this.scheduleRetry(entry.item, 'failure', 'mark_done_failed', err instanceof Error ? err.message : String(err));
+        this.logger.warn('runtime.transition.mark_done_failed', {
+          issue_id: entry.item.id,
+          issue_identifier: entry.item.identifier,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
     }
 
     this.scheduleRetry(entry.item, 'failure', 'worker_exit_failed');
@@ -554,6 +581,12 @@ export class PollingRuntime implements OrchestratorRuntime {
       return 1;
     }
     return Math.max(0, Math.floor(configured));
+  }
+
+  private shouldMarkDoneOnCompletion(): boolean {
+    const value = (this.workflow.extensions?.github_projects as Record<string, unknown> | undefined)
+      ?.mark_done_on_completion;
+    return value === true;
   }
 }
 

@@ -46,6 +46,33 @@ function item(id: string, number: number, state: string, labels: string[]): Proj
 }
 
 describe("GitHubProjectsAdapter", () => {
+  it('delegates markInProgress/markDone to writer when configured', async () => {
+    const calls: string[] = [];
+    const adapter = new GitHubProjectsAdapter({
+      owner: 'o',
+      projectNumber: 1,
+      client: new FakeClient([]),
+      writer: {
+        async markInProgress(itemId: string): Promise<void> {
+          calls.push(`in:${itemId}`);
+        },
+        async markDone(itemId: string): Promise<void> {
+          calls.push(`done:${itemId}`);
+        },
+      },
+    });
+
+    await adapter.markInProgress('A');
+    await adapter.markDone('A');
+    assert.deepEqual(calls, ['in:A', 'done:A']);
+  });
+
+  it('throws clear error when writer is missing for write operations', async () => {
+    const adapter = new GitHubProjectsAdapter({ owner: 'o', projectNumber: 1, client: new FakeClient([]) });
+
+    await assert.rejects(() => adapter.markInProgress('A'), /writer is not configured/i);
+    await assert.rejects(() => adapter.markDone('A'), /writer is not configured/i);
+  });
   it("paginates candidate fetch and keeps deterministic normalization", async () => {
     const client = new FakeClient([
       { items: [item("A", 101, "Todo", ["Bug", "P1"])], hasNextPage: true, endCursor: "1" },

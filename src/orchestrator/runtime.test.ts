@@ -177,6 +177,72 @@ describe('PollingRuntime state machine', () => {
     assert.deepEqual(runtime.snapshot().running, ['A']);
   });
 
+  it('marks item done on worker completion when workflow requires done transition', async () => {
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101)];
+    tracker.states.A = 'in_progress';
+
+    const runtime = new PollingRuntime(
+      tracker,
+      {
+        ...workflow,
+        extensions: {
+          github_projects: {
+            mark_done_on_completion: true,
+          },
+        },
+      },
+      new FakeLogger(),
+      baseRuntimeOptions,
+    );
+
+    await runtime.tick();
+    await runtime.handleWorkerExit('A', 'completed');
+
+    assert.equal(tracker.markDoneCalls.length, 1);
+    assert.deepEqual(runtime.snapshot().completed, ['A']);
+  });
+
+  it('schedules retry when markDone fails in required done transition path', async () => {
+    const now = 3_000;
+    class FailingDoneTracker extends FakeTracker {
+      override async markDone(itemId: string): Promise<void> {
+        this.markDoneCalls.push(itemId);
+        throw new Error('mutation failed');
+      }
+    }
+
+    const tracker = new FailingDoneTracker();
+    tracker.items = [item('A', 101)];
+    tracker.states.A = 'in_progress';
+
+    const logger = new FakeLogger();
+    const runtime = new PollingRuntime(
+      tracker,
+      {
+        ...workflow,
+        extensions: {
+          github_projects: {
+            mark_done_on_completion: true,
+          },
+        },
+      },
+      logger,
+      {
+        ...baseRuntimeOptions,
+        now: () => now,
+        failureRetryBaseDelayMs: 100,
+      },
+    );
+
+    await runtime.tick();
+    await runtime.handleWorkerExit('A', 'completed');
+
+    assert.equal(tracker.markDoneCalls.length, 1);
+    assert.equal(runtime.snapshot().retryAttempts.A, 1);
+    assert.ok(logger.warnLogs.some((log) => log.message === 'runtime.transition.mark_done_failed'));
+  });
+
   it('does not crash tick when state refresh fails and retries on next tick', async () => {
     const tracker = new FakeTracker();
     tracker.items = [item('A', 101)];
