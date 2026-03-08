@@ -102,7 +102,9 @@ const DEFAULT_STALL_TIMEOUT_MS = 30_000;
 
 /** Format the thread title as "<identifier>: <title>" when both are provided. */
 function formatThreadTitle(identifier?: string, title?: string): string | undefined {
-  const parts = [identifier, title].filter((p): p is string => typeof p === 'string' && p.trim() !== '');
+  const parts = [identifier, title].filter(
+    (p): p is string => typeof p === 'string' && p.trim() !== '',
+  );
   return parts.length > 0 ? parts.join(': ') : undefined;
 }
 
@@ -182,6 +184,7 @@ export class CodexAppServerClient {
     let activeIssue = false;
     let errorMessage: string | undefined;
     let initialized = false;
+    let nextRequestId = 1;
 
     child.stdout?.on('data', (chunk: Buffer | string) => {
       latestEventAt = Date.now();
@@ -200,10 +203,53 @@ export class CodexAppServerClient {
               'params.ready',
               'ready',
             ]);
-            if (initializedFlag === true || this.isInitializedEvent(event)) {
+            if (
+              initializedFlag === true ||
+              this.isInitializedEvent(event) ||
+              this.isInitializeResponse(event)
+            ) {
               initialized = true;
             }
 
+            // v2 protocol: detect turn completion via method-based events
+            const method = readString(event, ['method']);
+            const msgType = readString(event, ['params.msg.type']);
+
+            if (
+              method === 'turn/completed' ||
+              method === 'codex/event/task_complete' ||
+              msgType === 'task_complete'
+            ) {
+              completed = true;
+              this.state.turnsCompleted += 1;
+            }
+
+            // v2 protocol: detect cancellation
+            if (method === 'turn/cancelled' || msgType === 'task_cancelled') {
+              cancelled = true;
+            }
+
+            // v2 protocol: error notifications
+            if (method === 'error' || method === 'codex/event/error' || msgType === 'error') {
+              const errMsg =
+                readString(event, [
+                  'params.error.message',
+                  'params.msg.message',
+                  'error.message',
+                ]) ?? 'unknown error';
+              const errInfo =
+                readString(event, ['params.error.codexErrorInfo', 'params.msg.codex_error_info']) ??
+                '';
+              if (
+                /usage_limit|usagelimit|rate.?limit/i.test(errInfo) ||
+                /quota.*exceeded/i.test(errMsg)
+              ) {
+                this.state.latestRateLimitAt = Date.now();
+              }
+              errorMessage = errMsg;
+            }
+
+            // v1 fallback: boolean-based detection
             const completedFlag = readBoolean(event, [
               'params.turn.completed',
               'params.completed',
@@ -233,19 +279,6 @@ export class CodexAppServerClient {
             ]);
             if (activeIssueFlag !== undefined) {
               activeIssue = activeIssueFlag;
-            }
-            const rateLimited = readBoolean(event, [
-              'params.rate_limited',
-              'rate_limited',
-              'error.rate_limited',
-            ]);
-            if (rateLimited) {
-              errorMessage =
-                readString(event, ['params.error.message', 'error.message']) ?? 'rate limited';
-            }
-            const eventError = readString(event, ['params.error.message', 'error.message']);
-            if (eventError) {
-              errorMessage = eventError;
             }
           });
         }
@@ -279,7 +312,9 @@ export class CodexAppServerClient {
       },
       capabilities: {},
     };
-    child.stdin.write(`${JSON.stringify({ method: 'initialize', params: initializeParams })}\n`);
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: '2.0', id: nextRequestId++, method: 'initialize', params: initializeParams })}\n`,
+    );
 
     const initOutcome = await waitForUntil({
       isDone: () => initialized,
@@ -299,7 +334,7 @@ export class CodexAppServerClient {
       return { status: 'timeout', activeIssue: false, state: this.snapshotState() };
     }
     if (errorMessage) {
-      const status = /rate\s*limit/i.test(errorMessage) ? 'rate_limited' : 'error';
+      const status = /rate\s*limit|quota\s+exceeded/i.test(errorMessage) ? 'rate_limited' : 'error';
       child.kill('SIGTERM');
       return {
         status,
@@ -309,21 +344,55 @@ export class CodexAppServerClient {
       };
     }
 
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} })}\n`);
+
     // Step 2: Send thread/start. Reuse an existing thread for continuation turns,
     // or start a new one. Always include cwd and title for protocol compatibility.
     const threadTitle = formatThreadTitle(params.identifier, params.title);
-    const threadStartParams: Record<string, string> = {
-      prompt: params.renderedPrompt,
-      cwd: this.options.cwd,
-    };
+    const threadStartParams: Record<string, unknown> = this.state.threadId
+      ? { threadId: this.state.threadId, cwd: this.options.cwd }
+      : {
+          cwd: this.options.cwd,
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+        };
     if (threadTitle !== undefined) {
-      threadStartParams.title = threadTitle;
-    }
-    if (this.state.threadId) {
-      threadStartParams.thread_id = this.state.threadId;
+      threadStartParams.name = threadTitle;
     }
 
-    child.stdin.write(`${JSON.stringify({ method: 'thread.start', params: threadStartParams })}\n`);
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: '2.0', id: nextRequestId++, method: this.state.threadId ? 'thread/resume' : 'thread/start', params: threadStartParams })}\n`,
+    );
+
+    const threadOutcome = await waitForUntil({
+      isDone: () => Boolean(this.state.threadId),
+      hasError: () => errorMessage,
+      latestEventAt: () => latestEventAt,
+      turnTimeoutMs: this.turnTimeoutMs,
+      readTimeoutMs: this.readTimeoutMs,
+      stallTimeoutMs: this.stallTimeoutMs,
+    });
+
+    if (threadOutcome === 'stalled') {
+      child.kill('SIGTERM');
+      return { status: 'stalled', activeIssue: false, state: this.snapshotState() };
+    }
+    if (threadOutcome === 'timeout') {
+      child.kill('SIGTERM');
+      return { status: 'timeout', activeIssue: false, state: this.snapshotState() };
+    }
+    if (errorMessage || !this.state.threadId) {
+      const status = /rate\s*limit|quota\s+exceeded/i.test(errorMessage ?? '')
+        ? 'rate_limited'
+        : 'error';
+      child.kill('SIGTERM');
+      return {
+        status,
+        activeIssue: false,
+        state: this.snapshotState(),
+        errorMessage: errorMessage ?? 'thread/start did not return a thread id',
+      };
+    }
 
     // Step 3: Run turns within the thread.
     for (let turn = 1; turn <= this.maxTurns; turn += 1) {
@@ -333,15 +402,15 @@ export class CodexAppServerClient {
           : (params.continuationGuidance ?? 'Continue from the active issue and finish the task.');
 
       const turnParams: Record<string, unknown> = {
-        input: [{ type: 'text', text: inputMessage }],
-        turn,
+        threadId: this.state.threadId,
+        input: [{ type: 'text', text: inputMessage, text_elements: [] }],
+        cwd: this.options.cwd,
       };
-      if (this.state.threadId) {
-        turnParams.thread_id = this.state.threadId;
-      }
 
       const turnStartMessage = JSON.stringify({
-        method: 'turn.start',
+        jsonrpc: '2.0',
+        id: nextRequestId++,
+        method: 'turn/start',
         params: turnParams,
       });
       this.state.turnsStarted += 1;
@@ -365,7 +434,9 @@ export class CodexAppServerClient {
         return { status: 'timeout', activeIssue: false, state: this.snapshotState() };
       }
       if (errorMessage) {
-        const status = /rate\s*limit/i.test(errorMessage) ? 'rate_limited' : 'error';
+        const status = /rate\s*limit|quota\s+exceeded/i.test(errorMessage)
+          ? 'rate_limited'
+          : 'error';
         child.kill('SIGTERM');
         return {
           status,
@@ -412,6 +483,16 @@ export class CodexAppServerClient {
     return method === 'initialized' || method === 'initialize.done';
   }
 
+  private isInitializeResponse(event: JsonRpcEvent): boolean {
+    const rec = event as Record<string, unknown>;
+    return (
+      rec.id !== undefined &&
+      rec.result !== undefined &&
+      typeof rec.result === 'object' &&
+      rec.result !== null
+    );
+  }
+
   private handleEventLine(line: string, onEvent: (event: JsonRpcEvent) => void): void {
     try {
       const parsed = JSON.parse(line) as JsonRpcEvent;
@@ -422,13 +503,31 @@ export class CodexAppServerClient {
   }
 
   private applyEvent(event: JsonRpcEvent): void {
-    this.state.sessionId =
-      readString(event, ['params.session_id', 'session_id']) ?? this.state.sessionId;
-    this.state.threadId =
-      readString(event, ['params.thread_id', 'thread_id']) ?? this.state.threadId;
-    this.state.turnId = readString(event, ['params.turn_id', 'turn_id']) ?? this.state.turnId;
+    // v2: extract thread.id from thread/start response or thread/started notification
+    const resultThread = readString(event, ['result.thread.id']);
+    const paramsThread = readString(event, ['params.thread.id']);
+    const paramsThreadId = readString(event, ['params.threadId']);
+    const resultTurnId = readString(event, ['result.turn.id']);
+    const paramsTurnId = readString(event, ['params.turnId', 'params.turn.id']);
+    const conversationId = readString(event, ['params.conversationId']);
 
-    if (!this.state.sessionId && this.state.threadId) {
+    this.state.sessionId =
+      conversationId ??
+      readString(event, ['params.session_id', 'session_id']) ??
+      this.state.sessionId;
+    this.state.threadId =
+      resultThread ??
+      paramsThread ??
+      paramsThreadId ??
+      readString(event, ['params.thread_id', 'thread_id']) ??
+      this.state.threadId;
+    this.state.turnId =
+      resultTurnId ??
+      paramsTurnId ??
+      readString(event, ['params.turn_id', 'turn_id', 'params.msg.turn_id']) ??
+      this.state.turnId;
+
+    if (!conversationId && this.state.threadId) {
       this.state.sessionId = this.state.turnId
         ? `thread:${this.state.threadId}:${this.state.turnId}`
         : `thread:${this.state.threadId}`;
@@ -488,9 +587,7 @@ export class CodexAppServerClient {
 
   private snapshotState(): CodexSessionState {
     const runtimeSeconds =
-      this.runStartedAt !== undefined
-        ? (Date.now() - this.runStartedAt) / 1000
-        : 0;
+      this.runStartedAt !== undefined ? (Date.now() - this.runStartedAt) / 1000 : 0;
 
     return {
       sessionId: this.state.sessionId,
