@@ -118,6 +118,10 @@ Copy the example and customize it for your project:
 cp examples/WORKFLOW.md ./WORKFLOW.md
 ```
 
+By default, the repo ignores `WORKFLOW.md` in `.gitignore` so your local runtime configuration does
+not get committed accidentally. If you do want to version-control your workflow file, remove the
+`WORKFLOW.md` entry from `.gitignore` first.
+
 A minimal `WORKFLOW.md`:
 
 ```yaml
