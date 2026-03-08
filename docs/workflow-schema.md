@@ -29,7 +29,7 @@ polling:
   maxConcurrency: 2               # optional, >= 1 (default: 1)
 
 workspace:
-  baseDir: /tmp/symphony-github-projects/workspaces   # required
+  baseDir: /tmp/symphony-for-github-projects/workspaces   # required
 
 agent:
   command: codex                  # required

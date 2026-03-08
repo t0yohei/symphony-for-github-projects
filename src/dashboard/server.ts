@@ -149,14 +149,14 @@ function renderHtml(): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Symphony GitHub Projects Dashboard</title>
+    <title>Symphony for GitHub Projects Dashboard</title>
     <link rel="stylesheet" href="/dashboard.css" />
   </head>
   <body>
     <main class="shell">
       <header class="hero-card">
         <div>
-          <p class="eyebrow">Symphony GitHub Projects</p>
+          <p class="eyebrow">Symphony for GitHub Projects</p>
           <h1>Operations Dashboard</h1>
           <p class="hero-copy">Local runtime observability for running work, retry pressure, and rate-limit state.</p>
         </div>

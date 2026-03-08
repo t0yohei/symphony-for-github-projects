@@ -40,7 +40,7 @@ test("resolves env references", () => {
       MAX_CONCURRENCY: "2",
       WORKSPACE_ROOT: "/tmp/w",
       GH_OWNER: "kouka-t0yohei",
-      GH_REPO: "symphony-github-projects",
+      GH_REPO: "symphony-for-github-projects",
       PROJECT_NUMBER: "7",
       AGENT_COMMAND: "codex",
       TIMEOUT_MS: "120000",

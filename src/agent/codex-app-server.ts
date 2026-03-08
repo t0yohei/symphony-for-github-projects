@@ -274,7 +274,7 @@ export class CodexAppServerClient {
     const initializeParams: Record<string, unknown> = {
       cwd: this.options.cwd,
       clientInfo: {
-        name: 'symphony-github-projects',
+        name: 'symphony-for-github-projects',
         version: '0.1.0',
       },
       capabilities: {},

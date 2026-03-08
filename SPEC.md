@@ -122,7 +122,7 @@ Defaults should follow the intended spec behavior and be documented in `WORKFLOW
 For CI in this repository, use a minimal smoke profile:
 
 ```yaml
-name: Symphony GitHub Projects CI
+name: Symphony for GitHub Projects CI
 
 on:
   pull_request:

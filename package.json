@@ -1,12 +1,12 @@
 {
-  "name": "symphony-github-projects",
+  "name": "symphony-for-github-projects",
   "version": "0.1.0",
   "private": true,
   "description": "TypeScript scaffold for Symphony-style orchestrator targeting GitHub Projects",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "symphony-github-projects": "dist/cli.js"
+    "symphony-for-github-projects": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

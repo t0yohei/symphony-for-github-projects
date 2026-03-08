@@ -1,4 +1,4 @@
-# symphony-github-projects
+# symphony-for-github-projects
 
 - English README: `README.md`
 - 日本語 README: [README-ja.md](./README-ja.md)
@@ -17,15 +17,15 @@ experimental TypeScript/Node implementation of that pattern for GitHub Projects.
 ### Option 1. Use the spec to build your own implementation
 
 > Implement Symphony for GitHub Projects according to the following spec:
-> https://github.com/t0yohei/symphony-github-projects/blob/main/SPEC.md
+> https://github.com/t0yohei/symphony-for-github-projects/blob/main/SPEC.md
 
 ### Option 2. Use our experimental reference implementation
 
 Check out this repository as an experimental reference implementation and start with:
 
 ```bash
-git clone https://github.com/t0yohei/symphony-github-projects.git
-cd symphony-github-projects
+git clone https://github.com/t0yohei/symphony-for-github-projects.git
+cd symphony-for-github-projects
 npm install
 npm run build
 npm start
@@ -34,7 +34,7 @@ npm start
 You can also ask a coding agent to help with setup:
 
 > Set up Symphony for GitHub Projects for my repository based on
-> https://github.com/t0yohei/symphony-github-projects/blob/main/SPEC.md
+> https://github.com/t0yohei/symphony-for-github-projects/blob/main/SPEC.md
 
 You can use the included GitHub Actions workflow as a smoke-check baseline (`.github/workflows/ci.yml`).
 
@@ -69,8 +69,8 @@ GitHub Projects status updated
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/kouka-t0yohei/symphony-github-projects.git
-cd symphony-github-projects
+git clone https://github.com/kouka-t0yohei/symphony-for-github-projects.git
+cd symphony-for-github-projects
 npm install
 ```
 

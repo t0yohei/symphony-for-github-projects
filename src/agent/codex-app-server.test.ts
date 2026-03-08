@@ -152,7 +152,7 @@ test('initialize sends cwd, clientInfo, and capabilities for protocol compatibil
   const initMsg = writes.find((w) => w.method === 'initialize');
   assert.ok(initMsg, 'initialize message must be sent');
   assert.equal(initMsg.params.cwd, '/home/user/project');
-  assert.equal(initMsg.params.clientInfo.name, 'symphony-github-projects');
+  assert.equal(initMsg.params.clientInfo.name, 'symphony-for-github-projects');
   assert.equal(initMsg.params.clientInfo.version, '0.1.0');
   assert.deepEqual(initMsg.params.capabilities, {});
 });
