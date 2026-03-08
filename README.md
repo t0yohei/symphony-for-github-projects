@@ -180,6 +180,9 @@ It is served directly by the Node process and polls local runtime state every 5 
 ```bash
 npm run dev:dashboard
 
+# build + launch + open the dashboard in your default browser (macOS)
+npm run dev:dashboard:open
+
 # or run explicitly
 npm run build
 node dist/cli.js --workflow WORKFLOW.md --dashboard-port 4318

@@ -16,7 +16,8 @@
     "format:check": "prettier --check .",
     "test": "npm run build && node --test dist/**/*.test.js",
     "start": "node dist/cli.js",
-    "dev:dashboard": "npm run build && node dist/cli.js --workflow WORKFLOW.md --dashboard-port 4318"
+    "dev:dashboard": "npm run build && node dist/cli.js --workflow WORKFLOW.md --dashboard-port 4318",
+    "dev:dashboard:open": "npm run build && (node dist/cli.js --workflow WORKFLOW.md --dashboard-port 4318 & DASH_PID=$!; sleep 2; open http://127.0.0.1:4318; wait $DASH_PID)"
   },
   "engines": {
     "node": ">=20"
