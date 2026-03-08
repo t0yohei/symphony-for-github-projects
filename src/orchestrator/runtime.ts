@@ -36,10 +36,11 @@ export interface RuntimeStateSnapshot {
   claimed: string[];
   retryAttempts: Record<string, number>;
   completed: string[];
-  runningDetails: Array<{ itemId: string; issueIdentifier: string; sessionId?: string }>;
+  runningDetails: Array<{ itemId: string; issueIdentifier: string; sessionId?: string; runtimeSeconds: number }>;
   retryingDetails: Array<{ itemId: string; issueIdentifier: string; attempt: number; kind: 'continuation' | 'failure'; dueAt: string }>;
   usageTotals: RuntimeUsageTotals;
   aggregateRuntimeSeconds: number;
+  liveAggregateRuntimeSeconds: number;
   latestRateLimit?: RuntimeRateLimitSnapshot;
 }
 
@@ -468,16 +469,23 @@ export class PollingRuntime implements OrchestratorRuntime {
       retryAttempts[id] = entry.attempt;
     }
 
+    const now = this.now();
+    const aggregateRuntimeSeconds = Math.floor(this.aggregateRuntimeMs / 1000);
+    const runningDetails = [...this.running.entries()].map(([itemId, entry]) => ({
+      itemId,
+      issueIdentifier: entry.item.identifier ?? `#${entry.item.number ?? itemId}`,
+      sessionId: entry.sessionId,
+      runtimeSeconds: Math.max(0, Math.floor((now - entry.startedAt) / 1000)),
+    }));
+    const liveAggregateRuntimeSeconds =
+      aggregateRuntimeSeconds + runningDetails.reduce((sum, entry) => sum + entry.runtimeSeconds, 0);
+
     return {
       running: [...this.running.keys()],
       claimed: [...this.claimed],
       retryAttempts,
       completed: [...this.completed],
-      runningDetails: [...this.running.entries()].map(([itemId, entry]) => ({
-        itemId,
-        issueIdentifier: entry.item.identifier ?? `#${entry.item.number ?? itemId}`,
-        sessionId: entry.sessionId,
-      })),
+      runningDetails,
       retryingDetails: [...this.retry.entries()].map(([itemId, entry]) => ({
         itemId,
         issueIdentifier: entry.identifier,
@@ -486,7 +494,8 @@ export class PollingRuntime implements OrchestratorRuntime {
         dueAt: new Date(entry.dueAt).toISOString(),
       })),
       usageTotals: { ...this.usageTotals },
-      aggregateRuntimeSeconds: Math.floor(this.aggregateRuntimeMs / 1000),
+      aggregateRuntimeSeconds,
+      liveAggregateRuntimeSeconds,
       latestRateLimit: this.latestRateLimit,
     };
   }

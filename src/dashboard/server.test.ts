@@ -32,7 +32,7 @@ function makeSnapshot(): RuntimeStateSnapshot {
     claimed: ['item-2'],
     retryAttempts: { 'item-3': 2 },
     completed: ['item-4'],
-    runningDetails: [{ itemId: 'item-1', issueIdentifier: '#101', sessionId: 'session-1' }],
+    runningDetails: [{ itemId: 'item-1', issueIdentifier: '#101', sessionId: 'session-1', runtimeSeconds: 12 }],
     retryingDetails: [
       {
         itemId: 'item-3',
@@ -44,6 +44,7 @@ function makeSnapshot(): RuntimeStateSnapshot {
     ],
     usageTotals: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
     aggregateRuntimeSeconds: 90,
+    liveAggregateRuntimeSeconds: 102,
     latestRateLimit: { retryAfterMs: 5000, message: 'slow down' },
   };
 }
@@ -65,9 +66,11 @@ test('dashboard serves html and state json', async () => {
 
     const apiResponse = await fetch('http://127.0.0.1:43123/api/state');
     assert.equal(apiResponse.status, 200);
-    const payload = (await apiResponse.json()) as { summary: { running: number; totalTokens: number }; workflow: { owner: string } };
+    const payload = (await apiResponse.json()) as { summary: { running: number; totalTokens: number; liveAggregateRuntimeSeconds: number }; workflow: { owner: string }; running: Array<{ runtimeSeconds: number }> };
     assert.equal(payload.summary.running, 1);
     assert.equal(payload.summary.totalTokens, 15);
+    assert.equal(payload.summary.liveAggregateRuntimeSeconds, 102);
+    assert.equal(payload.running[0]?.runtimeSeconds, 12);
     assert.equal(payload.workflow.owner, 't0yohei');
   } finally {
     await server.stop();

@@ -27,6 +27,7 @@ interface DashboardPayload {
     inputTokens: number;
     outputTokens: number;
     aggregateRuntimeSeconds: number;
+    liveAggregateRuntimeSeconds: number;
   };
   health: {
     status: 'healthy' | 'busy';
@@ -118,6 +119,7 @@ function buildPayload(options: DashboardServerOptions): DashboardPayload {
       inputTokens: snapshot.usageTotals.inputTokens,
       outputTokens: snapshot.usageTotals.outputTokens,
       aggregateRuntimeSeconds: snapshot.aggregateRuntimeSeconds,
+      liveAggregateRuntimeSeconds: snapshot.liveAggregateRuntimeSeconds,
     },
     health: {
       status: snapshot.running.length > 0 || snapshot.retryingDetails.length > 0 ? 'busy' : 'healthy',
@@ -363,7 +365,8 @@ async function refresh() {
     metricCard('Claimed', numberFmt.format(payload.summary.claimed), 'Reserved dispatch slots'),
     metricCard('Completed', numberFmt.format(payload.summary.completed), 'Completed during this process lifetime'),
     metricCard('Total tokens', numberFmt.format(payload.summary.totalTokens), 'Input ' + numberFmt.format(payload.summary.inputTokens) + ' / Output ' + numberFmt.format(payload.summary.outputTokens)),
-    metricCard('Runtime', formatSeconds(payload.summary.aggregateRuntimeSeconds), 'Aggregate worker runtime')
+    metricCard('Runtime', formatSeconds(payload.summary.liveAggregateRuntimeSeconds), 'Live aggregate worker runtime'),
+    metricCard('Completed runtime', formatSeconds(payload.summary.aggregateRuntimeSeconds), 'Completed worker runtime only')
   ].join('');
 
   generatedAtEl.textContent = new Date(payload.generatedAt).toLocaleString();
@@ -374,10 +377,11 @@ async function refresh() {
 
   renderTable(
     runningEl,
-    ['Issue', 'Session', 'Item ID'],
+    ['Issue', 'Session', 'Runtime', 'Item ID'],
     payload.running.map((entry) => [
       escapeHtml(entry.issueIdentifier),
       escapeHtml(entry.sessionId || 'n/a'),
+      escapeHtml(formatSeconds(entry.runtimeSeconds)),
       escapeHtml(entry.itemId)
     ])
   );

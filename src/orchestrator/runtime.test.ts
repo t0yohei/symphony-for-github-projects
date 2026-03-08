@@ -1012,6 +1012,7 @@ describe('PollingRuntime state machine', () => {
       totalTokens: 16,
     });
     assert.equal(snapshot.aggregateRuntimeSeconds, 10);
+    assert.equal(snapshot.liveAggregateRuntimeSeconds, 10);
     assert.equal(snapshot.latestRateLimit?.code, 'rate_limited');
     assert.equal(snapshot.latestRateLimit?.retryAfterMs, 900);
     assert.ok(snapshot.retryingDetails.some((entry) => entry.itemId === 'B' && entry.kind === 'failure'));
