@@ -150,6 +150,27 @@ npm start
 node dist/cli.js
 ```
 
+### 5. Launch the local Web UI dashboard
+
+This repo now includes a lightweight observability dashboard inspired by Symphony's Elixir dashboard.
+It is served directly by the Node process and polls local runtime state every 5 seconds.
+
+```bash
+npm run build
+node dist/cli.js --workflow WORKFLOW.md --dashboard-port 4318
+# optional: expose on a specific interface
+node dist/cli.js --workflow WORKFLOW.md --dashboard-port 4318 --dashboard-host 0.0.0.0
+```
+
+Then open <http://127.0.0.1:4318>.
+
+Current dashboard scope:
+- summary metrics
+- workflow metadata
+- running session list
+- retry queue
+- latest rate-limit snapshot
+
 ## WORKFLOW.md Reference
 
 The `WORKFLOW.md` file is the single source of truth for orchestrator behavior. It is designed

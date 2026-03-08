@@ -218,6 +218,13 @@ test('parseArgs accepts --workflow option', () => {
   const result = parseArgs(['--workflow', 'custom/WORKFLOW.md']);
   assert.equal(result.workflowPath, 'custom/WORKFLOW.md');
 });
+
+test('parseArgs accepts dashboard host and port', () => {
+  const result = parseArgs(['--workflow', 'custom/WORKFLOW.md', '--dashboard-port', '4318', '--dashboard-host', '0.0.0.0']);
+  assert.equal(result.workflowPath, 'custom/WORKFLOW.md');
+  assert.equal(result.dashboardPort, 4318);
+  assert.equal(result.dashboardHost, '0.0.0.0');
+});
 test('parseArgs supports -w alias', () => {
   const result = parseArgs(['-w', 'another/workflow.md']);
   assert.equal(result.workflowPath, 'another/workflow.md');

@@ -6,9 +6,12 @@ import { FileWorkflowLoader, type LoadedWorkflowContract } from './workflow/cont
 import { WorkflowHotReloader } from './workflow/hot-reload.js';
 import type { WorkflowLoader } from './workflow/contract.js';
 import type { Logger } from './logging/logger.js';
+import { startDashboardServer, type DashboardServerHandle } from './dashboard/server.js';
 
 interface ServiceConfig {
   workflowPath: string;
+  dashboardPort?: number;
+  dashboardHost?: string;
 }
 
 interface ReloaderLike {
@@ -45,6 +48,8 @@ const DEFAULT_WORKFLOW_PATH = 'WORKFLOW.md';
 
 export function parseArgs(argv: string[]): ServiceConfig {
   let workflowPath = process.env.WORKFLOW_PATH ?? DEFAULT_WORKFLOW_PATH;
+  let dashboardPort: number | undefined;
+  let dashboardHost: string | undefined;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -57,17 +62,34 @@ export function parseArgs(argv: string[]): ServiceConfig {
     if ((arg === '--workflow' || arg === '-w') && i + 1 < argv.length) {
       workflowPath = argv[i + 1];
       i += 1;
+      continue;
+    }
+
+    if (arg === '--dashboard-port' && i + 1 < argv.length) {
+      const value = Number(argv[i + 1]);
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error(`Invalid --dashboard-port value: ${argv[i + 1]}`);
+      }
+      dashboardPort = value;
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--dashboard-host' && i + 1 < argv.length) {
+      dashboardHost = argv[i + 1];
+      i += 1;
     }
   }
 
-  return { workflowPath };
+  return { workflowPath, dashboardPort, dashboardHost };
 }
 
 function printUsage(): void {
   // eslint-disable-next-line no-console
   console.log(
-    `Usage: node dist/cli.js [--workflow path | -w path]\n` +
-      'Starts Symphony-GitHub-Projects runtime loop using the specified WORKFLOW.md.',
+    `Usage: node dist/cli.js [--workflow path | -w path] [--dashboard-port <port>] [--dashboard-host <host>]\n` +
+      'Starts Symphony-GitHub-Projects runtime loop using the specified WORKFLOW.md.\n' +
+      'Use --dashboard-port to serve the local observability dashboard.',
   );
 }
 
@@ -90,10 +112,12 @@ export async function startService(config: ServiceConfig, deps: ServiceDependenc
   });
 
   const runtime = bootstrapResult.runtime as PollingRuntime;
+  let currentWorkflow = bootstrapResult.workflow;
   let currentPollIntervalMs = bootstrapResult.workflow.polling.intervalMs;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let inFlightTick = false;
   let stopping = false;
+  let dashboard: DashboardServerHandle | null = null;
 
   const tick = async (): Promise<void> => {
     if (stopping) return;
@@ -133,6 +157,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDependenc
   const applyWorkflow = (contract: LoadedWorkflowContract): void => {
     try {
       runtime.applyWorkflow(contract);
+      currentWorkflow = contract;
       currentPollIntervalMs = Math.max(1_000, contract.polling.intervalMs);
       logger.info('runtime.config.reloaded', {
         pollIntervalMs: currentPollIntervalMs,
@@ -165,6 +190,10 @@ export async function startService(config: ServiceConfig, deps: ServiceDependenc
       timer = null;
     }
     reloader.stop();
+    if (dashboard) {
+      void dashboard.stop();
+      dashboard = null;
+    }
     logger.info('service.shutdown_requested');
   };
 
@@ -178,11 +207,24 @@ export async function startService(config: ServiceConfig, deps: ServiceDependenc
   }
 
   reloader.start(bootstrapResult.workflow);
+
+  if (config.dashboardPort) {
+    dashboard = await startDashboardServer({
+      host: config.dashboardHost,
+      port: config.dashboardPort,
+      logger,
+      getSnapshot: () => runtime.snapshot(),
+      getWorkflow: () => currentWorkflow,
+    });
+  }
+
   logger.info('service.started', {
     workflowPath,
     pollIntervalMs: currentPollIntervalMs,
     maxConcurrency: bootstrapResult.workflow.polling.maxConcurrency,
     runtimeKind: bootstrapResult.workflow.tracker.kind,
+    dashboardPort: config.dashboardPort,
+    dashboardHost: config.dashboardHost,
   });
 
   scheduleNextTick(0);
