@@ -362,6 +362,60 @@ describe('PollingRuntime state machine', () => {
     assert.deepEqual(runtime.snapshot().running, ['A']);
   });
 
+  it('backs off continuation retry when no dispatch slot is available', async () => {
+    let now = 5_000;
+    const tracker = new FakeTracker();
+    tracker.items = [item('A', 101), item('B', 102)];
+    tracker.states.A = 'in_progress';
+    tracker.states.B = 'in_progress';
+
+    const runtime = new PollingRuntime(
+      tracker,
+      {
+        ...workflow,
+        runtime: {
+          ...workflow.runtime,
+          maxConcurrency: 1,
+        },
+        polling: {
+          ...workflow.polling,
+          maxConcurrency: 1,
+        },
+      },
+      new FakeLogger(),
+      {
+        ...baseRuntimeOptions,
+        now: () => now,
+        continuationRetryDelayMs: 100,
+        failureRetryBaseDelayMs: 1000,
+      },
+    );
+
+    await runtime.tick();
+    await runtime.handleWorkerExit('A', 'completed');
+    assert.equal(runtime.snapshot().retryAttempts.A, 1);
+
+    (runtime as unknown as {
+      running: Map<string, { item: NormalizedWorkItem; startedAt: number; lastEventAt: number; workspacePath: string; worker?: { run: () => Promise<unknown>; cancel?: () => void } }>;
+    }).running.set('B', {
+      item: item('B', 102),
+      startedAt: now,
+      lastEventAt: now,
+      workspacePath: '/tmp/B',
+      worker: { run: async () => ({ status: 'completed', state: { usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } } }) },
+    });
+
+    now += 101;
+    await runtime.tick();
+
+    const retry = (runtime as unknown as { retry: Map<string, { dueAt: number; attempt: number; kind: 'continuation' | 'failure' }> }).retry.get('A');
+    assert.ok(retry);
+    assert.equal(retry?.attempt, 2);
+    assert.equal(retry?.kind, 'continuation');
+    assert.equal(retry?.dueAt, now + 5_000);
+    assert.equal(tracker.markInProgressCalls.length, 1);
+  });
+
   it('resets continuation attempt counter after failure retry context', async () => {
     const now = 3_000;
     const tracker = new FakeTracker();

@@ -704,11 +704,13 @@ export class PollingRuntime implements OrchestratorRuntime {
     const capacity = Math.max(0, maxConcurrency - this.resolveOccupiedSlots());
     if (capacity <= 0) {
       this.claimed.delete(itemId);
+      const noSlotDelayMs = Math.max(this.continuationRetryDelayMs * 5, 5_000);
       this.scheduleRetry(
         eligible,
         'continuation',
         'retry_fire_no_slot',
         `no dispatch slot available (occupied=${this.resolveOccupiedSlots()}, max=${maxConcurrency})`,
+        noSlotDelayMs,
       );
       return;
     }
@@ -950,6 +952,7 @@ export class PollingRuntime implements OrchestratorRuntime {
     kind: 'continuation' | 'failure',
     reason: string,
     error?: string,
+    overrideDelayMs?: number,
   ): void {
     const itemId = item.id;
     const current = this.retry.get(itemId);
@@ -963,12 +966,13 @@ export class PollingRuntime implements OrchestratorRuntime {
     // Failure retry formula: min(base * multiplier^(attempt-1), max_retry_backoff_ms)
     // Default base=10000, multiplier=2 → 10s, 20s, 40s, … capped at max_retry_backoff_ms.
     const delay =
-      kind === 'continuation'
+      overrideDelayMs ??
+      (kind === 'continuation'
         ? this.continuationRetryDelayMs
         : Math.min(
             this.failureRetryMaxDelayMs,
             Math.floor(this.failureRetryBaseDelayMs * this.failureRetryMultiplier ** Math.max(0, attempt - 1)),
-          );
+          ));
 
     const dueAt = this.now() + delay;
     const timer = setTimeout(() => {
