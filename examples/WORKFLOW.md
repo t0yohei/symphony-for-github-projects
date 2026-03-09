@@ -12,14 +12,29 @@ workspace:
 
 hooks:
   after_create: |
+    set -euo pipefail
+    # Prefer HTTPS + token in headless environments if SSH keys are not available.
     git clone git@github.com:your-org/your-repo.git .
-    npm install
+    if [ -f yarn.lock ]; then
+      yarn install --frozen-lockfile || yarn install
+    elif [ -f pnpm-lock.yaml ]; then
+      pnpm install --frozen-lockfile || pnpm install
+    else
+      npm install
+    fi
   before_run: |
+    set -euo pipefail
+    test -d .git
+    if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+      git stash push -u -m "symphony-before-run-$(date +%s)" >/dev/null
+    fi
     git fetch origin
     git checkout main
-    git pull origin main
+    git pull --ff-only origin main
 
 agent:
+  # If workspace-write is too restrictive for git add/commit in your environment,
+  # try: codex -s danger-full-access -a never app-server
   command: codex app-server
   max_turns: 20
   timeouts:
@@ -54,6 +69,11 @@ You are working on GitHub Project item {{ issue.identifier }}.
 
 Title: {{ issue.title }}
 Description: {{ issue.description }}
+
+Requirements:
+- Prefer touching tracked source files only.
+- If verification commands pick up generated output or cache directories, narrow checks to the relevant source files or directories and explain that choice.
+- If a patch fails because file context drifted, reread the file and retry with a narrower patch.
 
 Follow the repository's coding standards. Write tests for new functionality.
 Create a pull request when the implementation is complete.
