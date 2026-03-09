@@ -37,9 +37,16 @@ export interface RuntimeStateSnapshot {
   claimed: string[];
   retryAttempts: Record<string, number>;
   completed: string[];
-  runningDetails: Array<{ itemId: string; issueIdentifier: string; sessionId?: string; runtimeSeconds: number }>;
+  runningDetails: Array<{
+    itemId: string;
+    issueIdentifier: string;
+    sessionId?: string;
+    runtimeSeconds: number;
+    usage?: RuntimeUsageTotals;
+  }>;
   retryingDetails: Array<{ itemId: string; issueIdentifier: string; attempt: number; kind: 'continuation' | 'failure'; dueAt: string }>;
   usageTotals: RuntimeUsageTotals;
+  liveUsageTotals: RuntimeUsageTotals;
   aggregateRuntimeSeconds: number;
   liveAggregateRuntimeSeconds: number;
   latestRateLimit?: RuntimeRateLimitSnapshot;
@@ -57,6 +64,7 @@ interface RunningEntry {
   workspacePath: string;
   worker?: RuntimeWorker;
   sessionId?: string;
+  usage?: RuntimeUsageTotals;
 }
 
 interface RetryEntry {
@@ -353,6 +361,17 @@ export class PollingRuntime implements OrchestratorRuntime {
       running.sessionId = context.sessionId;
     }
 
+    if (context.usage) {
+      running.usage = {
+        inputTokens: toIntOrZero(context.usage.inputTokens),
+        outputTokens: toIntOrZero(context.usage.outputTokens),
+        totalTokens: Math.max(
+          toIntOrZero(context.usage.totalTokens),
+          toIntOrZero(context.usage.inputTokens) + toIntOrZero(context.usage.outputTokens),
+        ),
+      };
+    }
+
     if (context.rateLimit) {
       this.latestRateLimit = sanitizeRateLimit(context.rateLimit);
     }
@@ -496,9 +515,18 @@ export class PollingRuntime implements OrchestratorRuntime {
       issueIdentifier: entry.item.identifier ?? `#${entry.item.number ?? itemId}`,
       sessionId: entry.sessionId,
       runtimeSeconds: Math.max(0, Math.floor((now - entry.startedAt) / 1000)),
+      usage: entry.usage,
     }));
     const liveAggregateRuntimeSeconds =
       aggregateRuntimeSeconds + runningDetails.reduce((sum, entry) => sum + entry.runtimeSeconds, 0);
+    const liveUsageTotals = runningDetails.reduce(
+      (sum, entry) => ({
+        inputTokens: sum.inputTokens + (entry.usage?.inputTokens ?? 0),
+        outputTokens: sum.outputTokens + (entry.usage?.outputTokens ?? 0),
+        totalTokens: sum.totalTokens + (entry.usage?.totalTokens ?? 0),
+      }),
+      { ...this.usageTotals },
+    );
 
     return {
       running: [...this.running.keys()],
@@ -514,6 +542,7 @@ export class PollingRuntime implements OrchestratorRuntime {
         dueAt: new Date(entry.dueAt).toISOString(),
       })),
       usageTotals: { ...this.usageTotals },
+      liveUsageTotals,
       aggregateRuntimeSeconds,
       liveAggregateRuntimeSeconds,
       latestRateLimit: this.latestRateLimit,
@@ -954,6 +983,16 @@ export class PollingRuntime implements OrchestratorRuntime {
       turnTimeoutMs: context.workflow.agent?.timeouts?.turnTimeoutMs,
       readTimeoutMs: context.workflow.agent?.timeouts?.readTimeoutMs,
       stallTimeoutMs: context.workflow.agent?.timeouts?.stallTimeoutMs,
+      onUpdate: (state) => {
+        this.observeSession(context.item.id, {
+          sessionId: state.sessionId,
+          usage: {
+            inputTokens: state.usage.inputTokens,
+            outputTokens: state.usage.outputTokens,
+            totalTokens: state.usage.totalTokens,
+          },
+        });
+      },
     });
 
     return {

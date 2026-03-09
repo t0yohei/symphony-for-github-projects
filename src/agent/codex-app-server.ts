@@ -47,6 +47,7 @@ export interface CodexAppServerClientOptions {
   readTimeoutMs?: number;
   stallTimeoutMs?: number;
   spawn?: SpawnLike;
+  onUpdate?: (state: CodexSessionState) => void;
 }
 
 interface JsonRpcEvent {
@@ -562,18 +563,27 @@ export class CodexAppServerClient {
     const inputTokens = readNumber(event, [
       'params.usage.input_tokens',
       'params.tokens.input',
+      'params.info.total_token_usage.input_tokens',
+      'params.msg.info.total_token_usage.input_tokens',
+      'payload.info.total_token_usage.input_tokens',
       'usage.input_tokens',
       'tokens.input',
     ]);
     const outputTokens = readNumber(event, [
       'params.usage.output_tokens',
       'params.tokens.output',
+      'params.info.total_token_usage.output_tokens',
+      'params.msg.info.total_token_usage.output_tokens',
+      'payload.info.total_token_usage.output_tokens',
       'usage.output_tokens',
       'tokens.output',
     ]);
     const totalTokens = readNumber(event, [
       'params.usage.total_tokens',
       'params.tokens.total',
+      'params.info.total_token_usage.total_tokens',
+      'params.msg.info.total_token_usage.total_tokens',
+      'payload.info.total_token_usage.total_tokens',
       'usage.total_tokens',
       'tokens.total',
     ]);
@@ -599,6 +609,8 @@ export class CodexAppServerClient {
     if (rateLimited) {
       this.state.latestRateLimitAt = Date.now();
     }
+
+    this.options.onUpdate?.(this.snapshotState());
   }
 
   cancelCurrentRun(): boolean {

@@ -424,6 +424,49 @@ test('snapshot includes runtimeSeconds greater than or equal to zero after run c
   assert.ok(typeof result.state.runtimeSeconds === 'number' && result.state.runtimeSeconds >= 0);
 });
 
+test('captures token usage from token_count events', async () => {
+  const fake = new FakeChildProcess();
+  const client = new CodexAppServerClient({
+    cwd: '/tmp/workspace',
+    readTimeoutMs: 10,
+    stallTimeoutMs: 500,
+    spawn: () => {
+      queueMicrotask(() => {
+        fake.emitStdoutJson({ id: 1, result: { userAgent: 'diag/0.110.0' } });
+        fake.emitStdoutJson({ id: 2, result: { thread: { id: 't1' } } });
+        fake.emitStdoutJson({
+          method: 'event_msg',
+          params: {
+            type: 'token_count',
+            info: {
+              total_token_usage: {
+                input_tokens: 1234,
+                output_tokens: 56,
+                total_tokens: 1290,
+              },
+            },
+          },
+        });
+        fake.emitStdoutJson({ id: 3, result: { turn: { id: 'turn-1' } } });
+        fake.emitStdoutJson({
+          method: 'turn/completed',
+          params: { threadId: 't1', turn: { id: 'turn-1' } },
+        });
+      });
+      return fake;
+    },
+  });
+
+  const result = await client.run({ renderedPrompt: 'count tokens' });
+
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.state.usage, {
+    inputTokens: 1234,
+    outputTokens: 56,
+    totalTokens: 1290,
+  });
+});
+
 test('snapshot records latestRateLimitAt when a quota error event is observed', async () => {
   const fake = new FakeChildProcess();
   const beforeRun = Date.now();
