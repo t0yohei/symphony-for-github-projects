@@ -74,6 +74,10 @@ Requirements:
 - Prefer touching tracked source files only.
 - If verification commands pick up generated output or cache directories, narrow checks to the relevant source files or directories and explain that choice.
 - If a patch fails because file context drifted, reread the file and retry with a narrower patch.
+- Before staging changes, inspect the actual changed file list (`git status --short` and/or `git diff --name-only`) and stage only files that currently exist.
+- Do not guess file paths during `git add`; if a path is missing, re-check the worktree and use the exact existing paths.
+- If a lockfile-aware install fails only because your intentional dependency edits require a lockfile update, explain that and fall back to the normal install flow instead of stopping immediately.
+- For multi-surface features, it is acceptable to finish one coherent slice first (for example backend plus tests) instead of leaving a broad partial patch across backend and frontend.
 
 Follow the repository's coding standards. Write tests for new functionality.
 Create a pull request when the implementation is complete.
