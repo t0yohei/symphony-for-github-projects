@@ -437,7 +437,7 @@ describe('PollingRuntime state machine', () => {
   });
 
   it('reserves capacity for pending failure retries before dispatching new work', async () => {
-    let now = 7_000;
+    const now = 7_000;
     const tracker = new FakeTracker();
     tracker.items = [item('A', 101), item('B', 102), item('C', 103)];
     tracker.states.A = 'in_progress';
